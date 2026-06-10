@@ -2,6 +2,7 @@
 
 import logging
 import re
+from http.cookies import SimpleCookie
 from typing import Dict, List, Any
 from datetime import datetime
 from urllib.parse import quote, urljoin
@@ -107,10 +108,48 @@ class TrendingScraper:
             logger.error("Scrapling is not installed. Run: pip install 'scrapling[fetchers]'")
             return None
 
-        logger.info("Fetching %s", url)
-        page = StealthyFetcher.fetch(url, headless=True, network_idle=True)
+        cookies = self._playwright_cookies()
+        logger.info(
+            "Fetching %s%s",
+            url,
+            " with X cookies" if cookies else "",
+        )
+        page = StealthyFetcher.fetch(
+            url,
+            headless=True,
+            network_idle=True,
+            cookies=cookies or None,
+            wait=5000,
+            google_search=False,
+        )
         self._page_cache[url] = page
         return page
+
+    def _playwright_cookies(self) -> List[Dict[str, Any]]:
+        from config.settings import X_COOKIES
+
+        if not X_COOKIES:
+            return []
+
+        cookie = SimpleCookie()
+        cookie.load(X_COOKIES)
+
+        cookies = []
+        for name, morsel in cookie.items():
+            if not morsel.value:
+                continue
+            cookies.append(
+                {
+                    "name": name,
+                    "value": morsel.value,
+                    "domain": ".x.com",
+                    "path": "/",
+                    "secure": True,
+                    "sameSite": "Lax",
+                }
+            )
+
+        return cookies
 
     def _extract_trend_terms(self, page) -> List[str]:
         terms = []
@@ -145,30 +184,30 @@ class TrendingScraper:
         return tweets
 
     def _extract_author(self, article) -> str:
-        user = article.css_first('[data-testid="User-Name"]')
+        user = self._first(article, '[data-testid="User-Name"]')
         text = self._node_text(user)
         handle = re.search(r"@[\w_]+", text)
         return handle.group(0).lstrip("@") if handle else text.split("\n")[0].strip()
 
     def _extract_content(self, article) -> str:
-        tweet_text = article.css_first('[data-testid="tweetText"]')
+        tweet_text = self._first(article, '[data-testid="tweetText"]')
         return self._node_text(tweet_text)
 
     def _extract_created_at(self, article) -> str:
-        time_node = article.css_first("time")
-        return time_node.attrib.get("datetime", "") if time_node else ""
+        time_node = self._first(article, "time")
+        return self._attr(time_node, "datetime") if time_node else ""
 
     def _extract_tweet_url(self, article) -> str:
         from config.settings import X_BASE_URL
 
-        link = article.css_first('a[href*="/status/"]')
-        href = link.attrib.get("href", "") if link else ""
+        link = self._first(article, 'a[href*="/status/"]')
+        href = self._attr(link, "href") if link else ""
         return urljoin(X_BASE_URL, href)
 
     def _extract_media_urls(self, article) -> List[str]:
         urls = []
         for node in article.css('img[src*="pbs.twimg.com/media"], video source[src]'):
-            src = node.attrib.get("src", "")
+            src = self._attr(node, "src")
             if src and src not in urls:
                 urls.append(src)
         return urls
@@ -176,11 +215,21 @@ class TrendingScraper:
     def _extract_metric(self, article, metric: str) -> int:
         pattern = re.compile(rf"([\d,.]+[KkMm]?)\s+{metric}", re.IGNORECASE)
         for node in article.css("[aria-label]"):
-            aria_label = node.attrib.get("aria-label", "")
+            aria_label = self._attr(node, "aria-label")
             match = pattern.search(aria_label)
             if match:
                 return self._compact_number_to_int(match.group(1))
         return 0
+
+    def _first(self, node, selector: str):
+        matches = node.css(selector)
+        return matches.first if matches else None
+
+    def _attr(self, node, name: str) -> str:
+        if not node:
+            return ""
+        attrs = getattr(node, "attrib", {}) or {}
+        return attrs.get(name, "")
 
     def _node_text(self, node) -> str:
         if not node:

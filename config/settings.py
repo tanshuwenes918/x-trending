@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 
 def _csv_env(name: str, default: List[str]) -> List[str]:
@@ -28,7 +28,6 @@ def _int_env(name: str, default: int) -> int:
 # Countries to scrape
 DEFAULT_COUNTRIES: List[str] = [
     "Global",
-    "United States",
 ]
 
 # Categories to scrape
@@ -55,9 +54,50 @@ DEFAULT_CATEGORIES: List[str] = [
     "beauty",
     "Pets",
     "fashion",
+    "anime",
     "religion",
     "Home & Garden",
 ]
+
+CATEGORY_GROUPS: Dict[str, List[str]] = {
+    "AI / Tech / Creator Tools": [
+        "Technology",
+        "Science",
+        "Business & Finance",
+        "cryptocurrency",
+    ],
+    "Music / Dance / Entertainment": [
+        "music",
+        "dance",
+        "Entertainment",
+        "celebrity",
+        "movies&tv",
+        "anime",
+    ],
+    "Viral Culture / Meme / Social Buzz": [
+        "meme",
+        "relationship",
+        "fashion",
+        "beauty",
+        "food",
+        "Pets",
+    ],
+    "Gaming / Sports / Youth Culture": [
+        "Gaming",
+        "Sports",
+        "cars",
+    ],
+    "Lifestyle / Outdoor / Travel": [
+        "Travel",
+        "nature&outdoors",
+        "Health&Fitness",
+        "Home & Garden",
+    ],
+    "News / Society / Sensitive Topics": [
+        "News",
+        "religion",
+    ],
+}
 
 COUNTRIES = _csv_env("X_COUNTRIES", DEFAULT_COUNTRIES)
 CATEGORIES = _csv_env("X_CATEGORIES", DEFAULT_CATEGORIES)
@@ -72,9 +112,19 @@ REQUEST_TIMEOUT = _int_env("REQUEST_TIMEOUT", 30)
 MAX_RETRIES = _int_env("MAX_RETRIES", 3)
 MAX_TRENDS_PER_CATEGORY = _int_env("MAX_TRENDS_PER_CATEGORY", 10)
 MAX_TWEETS_PER_TREND = _int_env("MAX_TWEETS_PER_TREND", 5)
+MAX_ITEMS_PER_GROUP = _int_env("MAX_ITEMS_PER_GROUP", 7)
+TOP_ACTION_COUNT = _int_env("TOP_ACTION_COUNT", 5)
+LOOKBACK_HOURS = _int_env("LOOKBACK_HOURS", 24)
 X_BASE_URL = os.getenv("X_BASE_URL", "https://x.com")
 X_EXPLORE_URL = os.getenv("X_EXPLORE_URL", f"{X_BASE_URL}/explore/tabs/trending")
 X_CATEGORY_URL_TEMPLATE = os.getenv("X_CATEGORY_URL_TEMPLATE", "")
+X_COOKIES = os.getenv("X_COOKIES", "")
+
+# OpenAI-compatible LLM configuration. Store secrets in GitHub Actions secrets.
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "")
+LLM_ENABLED = _bool_env("LLM_ENABLED", True)
 
 # Debug mode
 DEBUG = _bool_env("DEBUG", False)

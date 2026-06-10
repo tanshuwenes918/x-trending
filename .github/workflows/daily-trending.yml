@@ -8,11 +8,11 @@ on:
       countries:
         description: "Comma-separated country names"
         required: false
-        default: "Global,United States"
+        default: "Global"
       categories:
         description: "Comma-separated category names"
         required: false
-        default: "Technology,News,Business & Finance,Science,Travel,Gaming,Sports,Health&Fitness,cryptocurrency,cars,music,dance,celebrity,relationship,movies&tv,nature&outdoors,Entertainment,food,meme,beauty,Pets,fashion,religion,Home & Garden"
+        default: "Technology,News,Business & Finance,Science,Travel,Gaming,Sports,Health&Fitness,cryptocurrency,cars,music,dance,celebrity,relationship,movies&tv,nature&outdoors,Entertainment,food,meme,beauty,Pets,fashion,anime,religion,Home & Garden"
       output_format:
         description: "Export destination"
         required: false
@@ -40,14 +40,21 @@ jobs:
     env:
       FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
       FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
-      X_COUNTRIES: ${{ inputs.countries || 'Global,United States' }}
-      X_CATEGORIES: ${{ inputs.categories || 'Technology,News,Business & Finance,Science,Travel,Gaming,Sports,Health&Fitness,cryptocurrency,cars,music,dance,celebrity,relationship,movies&tv,nature&outdoors,Entertainment,food,meme,beauty,Pets,fashion,religion,Home & Garden' }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      X_COOKIES: ${{ secrets.X_COOKIES }}
+      X_COUNTRIES: ${{ inputs.countries || 'Global' }}
+      X_CATEGORIES: ${{ inputs.categories || 'Technology,News,Business & Finance,Science,Travel,Gaming,Sports,Health&Fitness,cryptocurrency,cars,music,dance,celebrity,relationship,movies&tv,nature&outdoors,Entertainment,food,meme,beauty,Pets,fashion,anime,religion,Home & Garden' }}
       OUTPUT_FORMAT: ${{ inputs.output_format || 'feishu' }}
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
       OUTPUT_DIR: outputs
       TIMEZONE: Asia/Shanghai
       MAX_TRENDS_PER_CATEGORY: 10
       MAX_TWEETS_PER_TREND: 5
+      MAX_ITEMS_PER_GROUP: 7
+      TOP_ACTION_COUNT: 5
+      LOOKBACK_HOURS: 24
 
     steps:
       - name: Checkout

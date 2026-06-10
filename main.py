@@ -63,6 +63,7 @@ def main():
         # Import and run the scraper
         from scrapers.trending_scraper import TrendingScraper
         from processors.data_processor import DataProcessor
+        from processors.llm_processor import LLMProcessor
         from exporters.feishu_exporter import FeishuExporter
         from config.settings import CATEGORIES, COUNTRIES, DRY_RUN, OUTPUT_FORMAT
         
@@ -75,11 +76,13 @@ def main():
         # Initialize pipeline
         scraper = TrendingScraper()
         processor = DataProcessor()
+        llm_processor = LLMProcessor()
         exporter = FeishuExporter()
         
         # Scrape, process, persist, and export data
         raw_data = scraper.scrape_all()
         trending_data = processor.process(raw_data)
+        trending_data = llm_processor.enrich(trending_data)
         output_path = write_json_output(trending_data)
         logger.info("Wrote JSON output to %s", output_path)
 
