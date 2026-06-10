@@ -51,9 +51,7 @@ class FeishuExporter:
     def _format_messages(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Format processed data as Feishu post messages."""
         timestamp = data.get("timestamp", "")
-        blocks = [
-            self._text_line("X 趋势日报 | AI 视频 & AI 音乐"),
-        ]
+        blocks: List[List[Dict[str, str]]] = []
 
         for index, group in enumerate(data.get("groups", []), start=1):
             blocks.append(self._text_line(f"\n{self._section_number(index)}、{group.get('name', '')}"))
@@ -95,7 +93,7 @@ class FeishuExporter:
     def format_plain_text(self, data: Dict[str, Any]) -> str:
         """Format processed data as readable plain text for local preview."""
         lines = [
-            "X 趋势日报 | AI 视频 & AI 音乐",
+            self._report_title(data.get("timestamp", "")),
             "",
         ]
 
@@ -163,9 +161,9 @@ class FeishuExporter:
                     "post": {
                         "zh_cn": {
                             "title": (
-                                f"X 趋势日报 | AI 视频 & AI 音乐 {timestamp}"
+                                self._report_title(timestamp)
                                 if total == 1
-                                else f"X 趋势日报 | AI 视频 & AI 音乐 {timestamp} ({idx}/{total})"
+                                else f"{self._report_title(timestamp)} ({idx}/{total})"
                             ),
                             "content": chunk,
                         }
@@ -190,11 +188,6 @@ class FeishuExporter:
     def _text_line(self, text: str) -> List[Dict[str, str]]:
         return [{"tag": "text", "text": text}]
 
-    def _link_line(self, text: str, href: str) -> List[Dict[str, str]]:
-        if not href:
-            return self._text_line(text)
-        return [{"tag": "a", "text": text, "href": href}]
-
     def _text_with_metrics_and_link(
         self,
         text: str,
@@ -202,11 +195,11 @@ class FeishuExporter:
         href: str,
     ) -> List[Dict[str, str]]:
         metrics_text = self._metrics_text(item)
+        suffix = f"（{metrics_text}；" if metrics_text else "（"
         if not href:
-            suffix = f"（{metrics_text}）" if metrics_text else ""
-            return self._text_line(f"{text}{suffix}")
+            return self._text_line(f"{text}{f'（{metrics_text}）' if metrics_text else ''}")
         return [
-            {"tag": "text", "text": f"{text}（{metrics_text}；" if metrics_text else f"{text}（"},
+            {"tag": "text", "text": f"{text}{suffix}"},
             {"tag": "a", "text": href, "href": href},
             {"tag": "text", "text": "）"},
         ]
@@ -223,16 +216,30 @@ class FeishuExporter:
         return ""
 
     def _metrics_text(self, item: Dict[str, Any]) -> str:
-        likes = self._format_number(item.get("likes", 0))
-        retweets = self._format_number(item.get("retweets", 0))
-        views = self._format_number(item.get("views", 0))
-        return f"{likes}赞 + {retweets}转 + {views}浏览"
+        parts = []
+        likes = self._number_or_zero(item.get("likes", 0))
+        retweets = self._number_or_zero(item.get("retweets", 0))
+        replies = self._number_or_zero(item.get("replies", 0))
+        views = self._number_or_zero(item.get("views", 0))
+
+        if likes > 0:
+            parts.append(f"{self._format_number(likes)}赞")
+        if retweets > 0:
+            parts.append(f"{self._format_number(retweets)}转")
+        if replies > 0:
+            parts.append(f"{self._format_number(replies)}评")
+        if views > 0:
+            parts.append(f"{self._format_number(views)}浏览")
+        return " + ".join(parts)
+
+    def _number_or_zero(self, value: Any) -> int:
+        try:
+            return int(float(value or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def _format_number(self, value: Any) -> str:
-        try:
-            number = int(float(value or 0))
-        except (TypeError, ValueError):
-            number = 0
+        number = self._number_or_zero(value)
         if number >= 1_000_000:
             compact = f"{number / 1_000_000:.1f}".rstrip("0").rstrip(".")
             return f"{compact}M"
@@ -246,6 +253,9 @@ class FeishuExporter:
         if 1 <= index <= len(numbers):
             return numbers[index - 1]
         return str(index)
+
+    def _report_title(self, timestamp: str) -> str:
+        return f"X 趋势日报 | AI 视频 & AI 音乐 {timestamp}".strip()
 
     def _truncate(self, text: Any, limit: int) -> str:
         value = " ".join(str(text or "").split())

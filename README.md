@@ -1,53 +1,51 @@
 # X Trending
 
-Daily X Global Trending pipeline for AI video and AI music growth operations.
+Daily X Global Trending pipeline for AI music and AI video growth operations.
 
 ## Flow
 
 1. Open X Global Trending with Playwright.
-2. Inject `X_COOKIES` to keep the X login session.
-3. Click each configured category.
-4. Scroll the Popular today area to collect tweet candidates.
-5. Keep tweets from the past 24 hours.
+2. Reuse `X_STORAGE_STATE_B64` or inject `X_COOKIES` for the X login session.
+3. Open or click each configured category.
+4. Scroll the category feed to collect tweet candidates.
+5. Keep tweets from the configured lookback window.
 6. Merge source categories into 6 operating groups.
-7. Keep the hottest 7 tweets in each group.
-8. Use an OpenAI-compatible LLM to write Chinese summaries and traffic actions.
+7. Keep the hottest tweets in each group.
+8. Use an OpenAI-compatible LLM to write Chinese summaries and traffic actions for AI music/video acquisition.
 9. Send the report to Feishu and save a JSON copy.
 
 ## Scraped Fields
 
 Each tweet candidate includes:
 
-- author
-- created_at
-- content
-- replies
-- retweets
-- likes
-- views
-- media_urls
-- tweet_url
+- `author`
+- `created_at`
+- `content`
+- `replies`
+- `retweets`
+- `likes`
+- `views`
+- `media_urls`
+- `tweet_url`
 
 The processor also adds `country`, `source_category`, `trending_term`, and `score`.
 
 ## Feishu Output
 
 ```text
-X 趋势日报 | AI 视频 & AI 音乐
-
-数据范围：过去 24 小时
-国家：Global
-每类最多：7 条 | 入选推文：42 | LLM：已启用
+X 趋势日报 | AI 视频 & AI 音乐 2026-06-10T08:30:00+08:00
 
 一、AI / Tech / Creator Tools
-1. 科技趋势（Claude Fable 5新消息）：Claude 发布新模型相关消息，适合观察创作者对 AI 工具升级的反应。（89.6K赞 + 20.9K转 + 30.1M浏览；https://x.com/...）
+1. AI 音乐（工具热议）：创作者在讨论新工作流，适合拆成产品演示、教程短视频或生成模板。（1.2K赞 + 34转 + 56K浏览；https://x.com/...）
 
 二、Music / Dance / Entertainment
-...
+暂无符合条件的推文。
 
 七、最值得跟进的 5 个引流动作
-1. AI MV模板挑战：把该热点改成短视频模板挑战，引导用户生成同款 AI 视频或 AI 音乐。（12.3K赞 + 2.1K转 + 1.8M浏览；https://x.com/...）
+1. AI 音乐工作流：发起“30 秒生成同款 BGM + 口播视频”挑战，提供 3 个模板，评论区关键词领取并跳转生成页。（34转 + 56K浏览；https://x.com/...）
 ```
+
+When a metric is not collected from X, it is omitted instead of displayed as `0赞`.
 
 ## Category Groups
 
@@ -77,7 +75,7 @@ News, religion
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-scrapling install
+python -m playwright install chromium
 copy .env.example .env
 ```
 
@@ -118,12 +116,6 @@ Send the latest local JSON to Feishu without scraping X again:
 python main.py --input-json latest --output-format feishu
 ```
 
-Send to Feishu after configuring `FEISHU_WEBHOOK_URL`:
-
-```bash
-python main.py --output-format feishu
-```
-
 Check category clicking:
 
 ```bash
@@ -133,7 +125,7 @@ python scripts\check_x_categories.py --headed --use-chrome
 If GitHub Actions is redirected to X login even after setting `X_COOKIES`, export a full Playwright login state locally:
 
 ```bash
-python scripts\export_x_storage_state.py
+python scripts\export_x_storage_state.py --persistent
 ```
 
 After the browser opens, log in to X and press Enter in the terminal. Then copy the full content of `outputs/x_storage_state.b64.txt` into the GitHub Secret `X_STORAGE_STATE_B64`.
@@ -146,8 +138,7 @@ It runs every day at `01:00 UTC`, which is `09:00 Asia/Shanghai`, and can also b
 
 Required repository secrets:
 
-- `X_COOKIES`
-- `X_STORAGE_STATE_B64` if X rejects `X_COOKIES` on GitHub Actions
+- `X_STORAGE_STATE_B64` or `X_COOKIES`
 - `LLM_API_KEY`
 - `LLM_BASE_URL`
 - `LLM_MODEL`
@@ -161,6 +152,6 @@ Do not put API keys, X cookies, or Feishu webhook URLs in source files, README, 
 
 ## Notes
 
-GitHub Actions runs on a fresh Linux runner each time. The workflow installs Python dependencies and Playwright browsers, with browser files cached by `actions/cache` to reduce repeated downloads.
+GitHub Actions runs on a fresh Linux runner each time. The workflow installs Python dependencies and Playwright Chromium with system dependencies.
 
-X cookies can expire or be invalidated after logout/password changes. If Actions starts redirecting to login, update the `X_COOKIES` secret.
+X cookies can expire or be invalidated after logout/password changes. If Actions starts redirecting to login, update `X_STORAGE_STATE_B64` or `X_COOKIES`.
