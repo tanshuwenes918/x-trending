@@ -47,6 +47,7 @@ jobs:
       LLM_ENABLED: "true"
       LLM_REQUIRED: "true"
       X_COOKIES: ${{ secrets.X_COOKIES }}
+      X_STORAGE_STATE_B64: ${{ secrets.X_STORAGE_STATE_B64 }}
       X_COUNTRIES: ${{ inputs.countries || 'Global' }}
       X_CATEGORIES: ${{ inputs.categories || 'Technology,News,Business & Finance,Science,Travel,Gaming,Sports,Health & Fitness,cryptocurrency,cars,music,dance,celebrity,relationship,Movies & TV,Nature & Outdoors,food,meme,beauty,Pets,fashion,anime,religion,Home & Garden' }}
       X_EXPLORE_URL: https://x.com/i/jf/global-trending/home

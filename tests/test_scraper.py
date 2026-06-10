@@ -128,5 +128,8 @@ def test_feishu_formatter_builds_daily_report():
     flattened_text = "".join(part["text"] for block in content for part in block)
     assert "摘要：" not in flattened_text
     assert "链接：" not in flattened_text
+    assert "数据范围：" not in flattened_text
+    assert "国家：" not in flattened_text
+    assert "每类最多：" not in flattened_text
     assert "（" in flattened_text
     assert "1.2K赞 + 34转 + 56K浏览" in flattened_text

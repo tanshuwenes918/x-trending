@@ -51,19 +51,8 @@ class FeishuExporter:
     def _format_messages(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Format processed data as Feishu post messages."""
         timestamp = data.get("timestamp", "")
-        summary = data.get("summary", {})
-        countries = ", ".join(data.get("countries", []))
         blocks = [
             self._text_line("X 趋势日报 | AI 视频 & AI 音乐"),
-            self._text_line(f"数据范围：过去 {data.get('lookback_hours', 24)} 小时"),
-            self._text_line(f"国家：{countries or 'Global'}"),
-            self._text_line(
-                "每类最多：{max_items} 条 | 入选推文：{eligible} | LLM：{llm}".format(
-                    max_items=summary.get("max_items_per_group", 7),
-                    eligible=summary.get("eligible_tweet_count", 0),
-                    llm="已启用" if data.get("llm_used") else "未启用",
-                )
-            ),
         ]
 
         for index, group in enumerate(data.get("groups", []), start=1):
@@ -105,18 +94,8 @@ class FeishuExporter:
 
     def format_plain_text(self, data: Dict[str, Any]) -> str:
         """Format processed data as readable plain text for local preview."""
-        summary = data.get("summary", {})
-        countries = ", ".join(data.get("countries", [])) or "Global"
         lines = [
             "X 趋势日报 | AI 视频 & AI 音乐",
-            "",
-            f"数据范围：过去 {data.get('lookback_hours', 24)} 小时",
-            f"国家：{countries}",
-            "每类最多：{max_items} 条 | 入选推文：{eligible} | LLM：{llm}".format(
-                max_items=summary.get("max_items_per_group", 7),
-                eligible=summary.get("eligible_tweet_count", 0),
-                llm="已启用" if data.get("llm_used") else "未启用",
-            ),
             "",
         ]
 

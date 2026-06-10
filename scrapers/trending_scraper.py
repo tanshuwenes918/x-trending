@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
+import base64
+import json
 from datetime import datetime
 from http.cookies import SimpleCookie
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
@@ -32,15 +35,23 @@ class TrendingScraper:
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
-            context = browser.new_context(
-                viewport={"width": 1400, "height": 1000},
-                locale="en-US",
-                timezone_id="Asia/Shanghai",
-            )
+            context_options = {
+                "viewport": {"width": 1400, "height": 1000},
+                "locale": "en-US",
+                "timezone_id": "Asia/Shanghai",
+            }
+            storage_state = self._storage_state()
+            if storage_state:
+                logger.info("Using X Playwright storage state")
+                context_options["storage_state"] = storage_state
+
+            context = browser.new_context(**context_options)
             cookies = self._playwright_cookies()
-            if cookies:
+            if cookies and not storage_state:
                 logger.info("Injecting %d X cookies", len(cookies))
                 context.add_cookies(cookies)
+            elif cookies and storage_state:
+                logger.info("Skipping X_COOKIES because X storage state is configured")
 
             page = context.new_page()
             logger.info("Opening %s", X_EXPLORE_URL)
@@ -275,6 +286,24 @@ class TrendingScraper:
             )
 
         return cookies
+
+    def _storage_state(self) -> Optional[Dict[str, Any]]:
+        from config.settings import X_STORAGE_STATE, X_STORAGE_STATE_B64
+
+        if X_STORAGE_STATE_B64:
+            try:
+                decoded = base64.b64decode(X_STORAGE_STATE_B64).decode("utf-8")
+                return json.loads(decoded)
+            except Exception as exc:
+                raise RuntimeError("Failed to parse X_STORAGE_STATE_B64") from exc
+
+        if X_STORAGE_STATE:
+            path = Path(X_STORAGE_STATE)
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(X_STORAGE_STATE)
+
+        return None
 
     def _safe_inner_text(self, locator) -> str:
         try:

@@ -87,6 +87,7 @@ Fill `.env` locally:
 X_COUNTRIES=Global
 X_EXPLORE_URL=https://x.com/i/jf/global-trending/home
 X_COOKIES=auth_token=...; ct0=...; guest_id=...
+X_STORAGE_STATE_B64=
 
 LLM_ENABLED=true
 LLM_REQUIRED=true
@@ -129,6 +130,14 @@ Check category clicking:
 python scripts\check_x_categories.py --headed --use-chrome
 ```
 
+If GitHub Actions is redirected to X login even after setting `X_COOKIES`, export a full Playwright login state locally:
+
+```bash
+python scripts\export_x_storage_state.py
+```
+
+After the browser opens, log in to X and press Enter in the terminal. Then copy the full content of `outputs/x_storage_state.b64.txt` into the GitHub Secret `X_STORAGE_STATE_B64`.
+
 ## GitHub Actions
 
 The workflow is in `.github/workflows/daily-trending.yml`.
@@ -138,6 +147,7 @@ It runs every day at `01:00 UTC`, which is `09:00 Asia/Shanghai`, and can also b
 Required repository secrets:
 
 - `X_COOKIES`
+- `X_STORAGE_STATE_B64` if X rejects `X_COOKIES` on GitHub Actions
 - `LLM_API_KEY`
 - `LLM_BASE_URL`
 - `LLM_MODEL`

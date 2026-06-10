@@ -120,6 +120,8 @@ X_BASE_URL = os.getenv("X_BASE_URL", "https://x.com")
 X_EXPLORE_URL = os.getenv("X_EXPLORE_URL", f"{X_BASE_URL}/explore/tabs/trending")
 X_CATEGORY_URL_TEMPLATE = os.getenv("X_CATEGORY_URL_TEMPLATE", "")
 X_COOKIES = os.getenv("X_COOKIES", "")
+X_STORAGE_STATE = os.getenv("X_STORAGE_STATE", "")
+X_STORAGE_STATE_B64 = os.getenv("X_STORAGE_STATE_B64", "")
 
 # OpenAI-compatible LLM configuration. Store secrets in GitHub Actions secrets.
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
