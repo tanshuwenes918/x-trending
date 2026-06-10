@@ -1,0 +1,22 @@
+[Unit]
+Description=twitter-cli remote MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=twitter-mcp
+Group=twitter-mcp
+WorkingDirectory=/opt/twitter-cli
+EnvironmentFile=/etc/twitter-mcp.env
+ExecStart=/opt/twitter-cli/.venv/bin/twitter-mcp
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/twitter-cli
+
+[Install]
+WantedBy=multi-user.target

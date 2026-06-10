@@ -1,80 +1,132 @@
 # X Trending
 
-抓推文➡️分类汇总➡️写入飞书
+Daily X trend pipeline for AI video and AI music growth operations.
 
-A Python application that scrapes X (Twitter) Global Trending data across multiple countries and categories, organizes the data, and sends summaries to Feishu (飞书).
+## Flow
 
-## Features
+1. Open X Global Trending with Playwright.
+2. Inject `X_COOKIES` to keep the X login session.
+3. Click each configured category card.
+4. Scroll the Popular today area to collect tweet candidates.
+5. Keep tweets from the past 24 hours.
+6. Merge source categories into 6 operating groups.
+7. Keep the hottest 7 tweets in each group.
+8. Optionally use an OpenAI-compatible LLM for summaries and traffic actions.
+9. Send the report to Feishu and save a JSON copy.
 
-- **Multi-Country Support**: Global, United States, and more
-- **Multi-Category Support**: Technology, News, Business & Finance, Science, Travel, Gaming, Sports, Health&Fitness, cryptocurrency, cars, music, dance, celebrity, relationship, movies&tv, nature&outdoors, Entertainment, food, meme, beauty, Pets, fashion, religion, Home & Garden, etc.
-- **Data Extraction**: 
-  - Trending terms
-  - Popular today tweets
-  - Author information
-  - Publication time
-  - Tweet content
-  - Engagement metrics (likes, retweets, replies)
-  - View count
-  - Image/video URLs
-  - Tweet URLs
-- **Feishu Integration**: Automatic summarization and organization of trending data
+## Feishu Output
 
-## Architecture
+```text
+X 趋势日报 | AI 视频 & AI 音乐
 
+数据范围：过去 24 小时
+国家：Global
+每类最多：7 条
+
+一、AI / Tech / Creator Tools
+1. 摘要：...
+   链接：原推文
+
+二、Music / Dance / Entertainment
+1. 摘要：...
+   链接：原推文
+
+三、Viral Culture / Meme / Social Buzz
+...
+
+四、Gaming / Sports / Youth Culture
+...
+
+五、Lifestyle / Outdoor / Travel
+...
+
+六、News / Society / Sensitive Topics
+...
+
+七、最值得跟进的 5 个引流动作
+1. 标题：...
+   引流动作：...
+   链接：原推文
 ```
-├── scrapers/          # Web scraping modules
-├── processors/        # Data processing and transformation
-├── exporters/         # Output handlers (Feishu, file, etc.)
-├── config/            # Configuration files
-├── utils/             # Utility functions
-├── tests/             # Unit and integration tests
-└── main.py           # Entry point
+
+## Category Groups
+
+```text
+AI / Tech / Creator Tools
+Technology, Science, Business & Finance, cryptocurrency
+
+Music / Dance / Entertainment
+music, dance, celebrity, Movies & TV, anime
+
+Viral Culture / Meme / Social Buzz
+meme, relationship, fashion, beauty, food, Pets
+
+Gaming / Sports / Youth Culture
+Gaming, Sports, cars
+
+Lifestyle / Outdoor / Travel
+Travel, Nature & Outdoors, Health & Fitness, Home & Garden
+
+News / Society / Sensitive Topics
+News, religion
 ```
 
-## Installation
+## Local Setup
 
 ```bash
-git clone https://github.com/tanshuwenes918/x-trending.git
-cd x-trending
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
+scrapling install
+copy .env.example .env
 ```
 
-## Configuration
+Fill `.env`:
 
-Create a `.env` file with the following variables:
+```dotenv
+X_COUNTRIES=Global
+X_EXPLORE_URL=https://x.com/i/jf/global-trending/home
+X_COOKIES=auth_token=...; ct0=...; guest_id=...
 
+OUTPUT_FORMAT=json
+DRY_RUN=true
+LLM_ENABLED=false
 ```
-FEISHU_WEBHOOK_URL=your_feishu_webhook_url
-SCRAPE_INTERVAL=3600  # Seconds between scrapes
-DEBUG=false
-```
 
-## Usage
+Dry run:
 
 ```bash
-python main.py
+python main.py --output-format json --dry-run
 ```
 
-## Technologies
+Check category clicking:
 
-- **Scraping**: [Scrapling](https://github.com/D4Vinci/Scrapling)
-- **Language**: Python 3.8+
-- **Data Processing**: Pandas, BeautifulSoup
-- **API Integration**: Feishu (Lark)
+```bash
+python scripts\check_x_categories.py --headed --use-chrome
+```
 
-## Project Structure
+## GitHub Actions
 
-- **Scrapers**: Handles data collection from X Global Trending
-- **Processors**: Cleans, categorizes, and organizes trending data
-- **Exporters**: Sends organized data to Feishu
-- **Config**: Manages countries, categories, and settings
-- **Utils**: Helper functions for logging, data validation, etc.
+The workflow is in `.github/workflows/daily-trending.yml`.
 
-## License
+It runs every day at `00:30 UTC`, which is `08:30 Asia/Shanghai`, and can also be started manually.
 
-MIT
+Required repository secrets:
 
-## Author
+- `X_COOKIES`
+- `FEISHU_WEBHOOK_URL` if exporting to Feishu
 
-tanshuwenes918
+Optional repository secrets:
+
+- `FEISHU_SECRET`
+- `LLM_API_KEY`
+- `LLM_BASE_URL`
+- `LLM_MODEL`
+
+Do not put API keys or X cookies in source files, README, `.env.example`, or normal GitHub variables.
+
+## Notes
+
+GitHub Actions can run this automatically. The runner installs Python dependencies and Playwright browsers each run; browser files are cached with `actions/cache` to reduce repeated download time.
+
+X cookies expire or may be invalidated after logout/password changes. If Actions starts redirecting to login, update the `X_COOKIES` secret.

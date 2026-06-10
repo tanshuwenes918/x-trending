@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.env
+local-env/
+*.json
+!tests/fixtures/*.json
+!config.yaml
+.idea/
+.DS_Store
