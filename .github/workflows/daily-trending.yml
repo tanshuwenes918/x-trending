@@ -2,7 +2,7 @@ name: Daily X Trending
 
 on:
   schedule:
-    - cron: "30 0 * * *"
+    - cron: "0 1 * * *"
   workflow_dispatch:
     inputs:
       countries:
@@ -86,7 +86,7 @@ jobs:
           scrapling install
 
       - name: Run tests
-        run: pytest -q
+        run: pytest -q tests
 
       - name: Scrape and export
         run: python main.py

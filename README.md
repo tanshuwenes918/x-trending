@@ -133,7 +133,7 @@ python scripts\check_x_categories.py --headed --use-chrome
 
 The workflow is in `.github/workflows/daily-trending.yml`.
 
-It runs every day at `00:30 UTC`, which is `08:30 Asia/Shanghai`, and can also be started manually.
+It runs every day at `01:00 UTC`, which is `09:00 Asia/Shanghai`, and can also be started manually.
 
 Required repository secrets:
 
