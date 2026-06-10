@@ -8,7 +8,6 @@ small JSON report under `outputs/`.
 from __future__ import annotations
 
 import json
-import re
 import sys
 import argparse
 from datetime import datetime
@@ -25,6 +24,7 @@ sys.path.insert(0, str(project_root))
 load_dotenv(project_root / ".env", override=True)
 
 from config.settings import CATEGORIES, SCROLLS_PER_CATEGORY, X_COOKIES, X_EXPLORE_URL
+from scrapers.trending_scraper import TrendingScraper
 
 
 def parse_cookies(raw: str) -> List[Dict[str, Any]]:
@@ -45,32 +45,6 @@ def parse_cookies(raw: str) -> List[Dict[str, Any]]:
             }
         )
     return cookies
-
-
-def find_category_locator(page, category: str):
-    exact = page.get_by_text(category, exact=True)
-    if exact.count() > 0:
-        return exact.first
-
-    fuzzy = page.get_by_text(re.compile(re.escape(category), re.IGNORECASE))
-    if fuzzy.count() > 0:
-        return fuzzy.first
-
-    return None
-
-
-def scroll_horizontal_candidates(page) -> None:
-    page.evaluate(
-        """
-        () => {
-          for (const el of document.querySelectorAll('div')) {
-            if (el.scrollWidth > el.clientWidth + 50) {
-              el.scrollLeft = el.scrollWidth;
-            }
-          }
-        }
-        """
-    )
 
 
 def main() -> None:
@@ -95,6 +69,7 @@ def main() -> None:
     print(f"URL: {X_EXPLORE_URL}")
     print(f"Categories: {len(CATEGORIES)}")
     print(f"Cookies parsed: {len(cookies)}")
+    scraper = TrendingScraper()
 
     with sync_playwright() as playwright:
         launch_kwargs = {"headless": not args.headed}
@@ -118,7 +93,7 @@ def main() -> None:
 
         page = context.new_page()
         page.goto(X_EXPLORE_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(8000)
+        scraper._wait_for_global_trending_ready(page)
 
         initial = {
             "loaded_url": page.url,
@@ -137,17 +112,9 @@ def main() -> None:
                 "url": page.url,
             }
             try:
-                locator = find_category_locator(page, category)
-                if locator is None:
-                    scroll_horizontal_candidates(page)
-                    page.wait_for_timeout(1000)
-                    locator = find_category_locator(page, category)
-
-                if locator is None:
+                if not scraper._click_category(page, category):
                     result["status"] = "not_found"
                 else:
-                    locator.scroll_into_view_if_needed(timeout=5000)
-                    locator.click(timeout=8000)
                     page.wait_for_timeout(5000)
                     seen = set()
                     for _ in range(SCROLLS_PER_CATEGORY + 1):

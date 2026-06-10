@@ -26,6 +26,13 @@ class TestTrendingScraper:
         assert "Movies & TV" in self.scraper._category_aliases("movies&tv")
         assert "Nature & Outdoors" in self.scraper._category_aliases("nature&outdoors")
 
+    def test_metric_values_parse_x_labels_and_visible_counts(self):
+        """Test X metric labels and visible compact counts are parsed."""
+        assert self.scraper._extract_metric_value("23.6K reposts. Repost", "repost") == 23600
+        assert self.scraper._extract_metric_value("Likes 1,234", "like") == 1234
+        assert self.scraper._extract_metric_value("18.9K", "view") == 18900
+        assert self.scraper._extract_metric_value("1.2M views", "view") == 1200000
+
 
 def test_data_processor_groups_and_ranks_recent_tweets():
     """Test processor maps source categories into operating groups."""

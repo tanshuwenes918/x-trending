@@ -10,7 +10,7 @@ from datetime import datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -56,7 +56,7 @@ class TrendingScraper:
             page = context.new_page()
             logger.info("Opening %s", X_EXPLORE_URL)
             page.goto(X_EXPLORE_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(8000)
+            self._wait_for_global_trending_ready(page)
             logger.info("Loaded X page: %s", page.url)
 
             if "onboarding" in page.url or "login" in page.url:
@@ -95,8 +95,9 @@ class TrendingScraper:
             raise RuntimeError("TrendingScraper requires a Playwright page for category scraping.")
 
         logger.info("Scraping %s - %s...", country, category)
-        if not self._click_category(page, category):
+        if not self._open_category(page, country, category):
             logger.warning("Category not found or not clickable: %s", category)
+            logger.info("Visible non-tweet text sample: %s", self._visible_non_tweet_text_sample(page))
             return []
 
         self._wait_for_popular_today(page)
@@ -111,10 +112,37 @@ class TrendingScraper:
             }
         ]
 
+    def _open_category(self, page: Page, country: str, category: str) -> bool:
+        if self._goto_category_url(page, country, category):
+            return True
+        return self._click_category(page, category)
+
+    def _goto_category_url(self, page: Page, country: str, category: str) -> bool:
+        from config.settings import X_CATEGORY_URL_TEMPLATE
+
+        if not X_CATEGORY_URL_TEMPLATE:
+            return False
+
+        url = X_CATEGORY_URL_TEMPLATE.format(
+            country=country,
+            category=quote(category),
+            country_slug=self._slug(country),
+            category_slug=self._slug(category),
+        )
+        logger.info("Opening category URL for %s: %s", category, url)
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            self._wait_for_global_trending_ready(page)
+            return "login" not in page.url and "onboarding" not in page.url
+        except Exception as exc:
+            logger.warning("Failed opening category URL for %s: %s", category, exc)
+            return False
+
     def _click_category(self, page: Page, category: str) -> bool:
         aliases = self._category_aliases(category)
 
         for _ in range(3):
+            self._return_to_category_nav(page)
             for alias in aliases:
                 locator = self._find_text_locator(page, alias)
                 if locator is None:
@@ -135,15 +163,34 @@ class TrendingScraper:
         return False
 
     def _find_text_locator(self, page: Page, text: str):
-        exact = page.get_by_text(text, exact=True)
-        if exact.count() > 0:
-            return exact.first
-
-        fuzzy = page.get_by_text(re.compile(re.escape(text), re.IGNORECASE))
-        if fuzzy.count() > 0:
-            return fuzzy.first
+        for locator in (
+            page.get_by_text(text, exact=True),
+            page.get_by_text(re.compile(re.escape(text), re.IGNORECASE)),
+        ):
+            count = min(locator.count(), 20)
+            for index in range(count):
+                candidate = locator.nth(index)
+                if self._is_safe_category_candidate(candidate):
+                    return candidate
 
         return None
+
+    def _is_safe_category_candidate(self, locator) -> bool:
+        try:
+            return bool(
+                locator.evaluate(
+                    """
+                    (el) => {
+                      if (!el || !el.isConnected) return false;
+                      if (el.closest('article[data-testid="tweet"]')) return false;
+                      const rect = el.getBoundingClientRect();
+                      return rect.width > 0 && rect.height > 0;
+                    }
+                    """
+                )
+            )
+        except Exception:
+            return False
 
     def _category_aliases(self, category: str) -> List[str]:
         aliases = [category]
@@ -162,6 +209,13 @@ class TrendingScraper:
         aliases.extend(replacements.get(normalized, []))
         return list(dict.fromkeys(aliases))
 
+    def _return_to_category_nav(self, page: Page) -> None:
+        try:
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(1000)
+        except Exception as exc:
+            logger.debug("Failed returning to category nav: %s", exc)
+
     def _scroll_horizontal_category_rails(self, page: Page) -> None:
         page.evaluate(
             """
@@ -174,6 +228,21 @@ class TrendingScraper:
             }
             """
         )
+
+    def _wait_for_global_trending_ready(self, page: Page) -> None:
+        for attempt in range(2):
+            try:
+                page.get_by_text("Popular today").first.wait_for(timeout=30000)
+                return
+            except PlaywrightTimeoutError:
+                if page.locator('article[data-testid="tweet"]').count() > 0:
+                    return
+                if attempt == 0:
+                    logger.info("X trending page was not ready; reloading once")
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                    continue
+
+        logger.warning("X trending page did not show ready markers before scraping")
 
     def _wait_for_popular_today(self, page: Page) -> None:
         try:
@@ -245,21 +314,81 @@ class TrendingScraper:
         return urls
 
     def _extract_metric(self, article, metric: str) -> int:
-        patterns = {
-            "like": r"([\d,.]+[KkMm]?)\s+(?:likes?|like)",
-            "repost": r"([\d,.]+[KkMm]?)\s+(?:reposts?|retweets?|repost|retweet)",
-            "reply": r"([\d,.]+[KkMm]?)\s+(?:replies|reply)",
-            "view": r"([\d,.]+[KkMm]?)\s+(?:views?|view)",
+        selectors = {
+            "like": [
+                '[data-testid="like"]',
+                '[data-testid="unlike"]',
+            ],
+            "repost": [
+                '[data-testid="retweet"]',
+                '[data-testid="unretweet"]',
+            ],
+            "reply": [
+                '[data-testid="reply"]',
+            ],
+            "view": [
+                'a[href$="/analytics"]',
+                'a[aria-label*="view" i]',
+                '[aria-label*="views" i]',
+            ],
         }
-        pattern = re.compile(patterns[metric], re.IGNORECASE)
+
+        for selector in selectors[metric]:
+            for locator in article.locator(selector).all():
+                for text in self._metric_text_candidates(locator):
+                    value = self._extract_metric_value(text, metric)
+                    if value:
+                        return value
 
         for locator in article.locator("[aria-label]").all():
-            aria_label = self._safe_attr(locator, "aria-label")
-            match = pattern.search(aria_label)
+            value = self._extract_metric_value(self._safe_attr(locator, "aria-label"), metric)
+            if value:
+                return value
+
+        return 0
+
+    def _metric_text_candidates(self, locator) -> List[str]:
+        candidates = [
+            self._safe_attr(locator, "aria-label"),
+            self._safe_attr(locator, "title"),
+            self._safe_inner_text(locator),
+        ]
+        try:
+            for child in locator.locator("[aria-label]").all():
+                candidates.append(self._safe_attr(child, "aria-label"))
+        except Exception:
+            pass
+        return [text for text in candidates if text]
+
+    def _extract_metric_value(self, text: str, metric: str) -> int:
+        normalized = self._clean_metric_text(text)
+        if not normalized:
+            return 0
+
+        keyword_groups = {
+            "like": r"likes?|liked",
+            "repost": r"reposts?|retweets?|reposted|retweeted",
+            "reply": r"replies|reply",
+            "view": r"views?|view",
+        }
+        number = r"(\d+(?:[,.]\d+)?\s*[KkMmBb]?)"
+        keyword = keyword_groups[metric]
+
+        for pattern in (
+            rf"{number}\s+{keyword}\b",
+            rf"\b{keyword}\s+{number}",
+        ):
+            match = re.search(pattern, normalized, re.IGNORECASE)
             if match:
                 return self._compact_number_to_int(match.group(1))
 
+        if re.fullmatch(number, normalized):
+            return self._compact_number_to_int(normalized)
+
         return 0
+
+    def _clean_metric_text(self, value: str) -> str:
+        return " ".join(str(value or "").replace("\xa0", " ").split())
 
     def _playwright_cookies(self) -> List[Dict[str, Any]]:
         from config.settings import X_COOKIES
@@ -321,8 +450,26 @@ class TrendingScraper:
         except Exception:
             return ""
 
+    def _visible_non_tweet_text_sample(self, page: Page) -> List[str]:
+        try:
+            return page.evaluate(
+                """
+                () => Array.from(document.querySelectorAll('a, button, [role="button"], [role="tab"], [role="link"], div[tabindex]'))
+                  .filter((el) => !el.closest('article[data-testid="tweet"]'))
+                  .map((el) => (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' '))
+                  .filter(Boolean)
+                  .slice(0, 30)
+                """
+            )
+        except Exception:
+            return []
+
     def _compact_number_to_int(self, value: str) -> int:
-        text = value.replace(",", "").strip()
+        text = self._clean_metric_text(value).replace(" ", "")
+        if "," in text and "." not in text and re.fullmatch(r"\d+,\d{1,2}[KkMmBb]?", text):
+            text = text.replace(",", ".")
+        else:
+            text = text.replace(",", "")
         multiplier = 1
         if text.lower().endswith("k"):
             multiplier = 1_000
@@ -330,7 +477,13 @@ class TrendingScraper:
         elif text.lower().endswith("m"):
             multiplier = 1_000_000
             text = text[:-1]
+        elif text.lower().endswith("b"):
+            multiplier = 1_000_000_000
+            text = text[:-1]
         try:
             return int(float(text) * multiplier)
         except ValueError:
             return 0
+
+    def _slug(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
