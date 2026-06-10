@@ -372,7 +372,7 @@ class TrendingScraper:
             "view": r"views?|view",
         }
         number = r"(\d+(?:[,.]\d+)?\s*[KkMmBb]?)"
-        keyword = keyword_groups[metric]
+        keyword = f"(?:{keyword_groups[metric]})"
 
         for pattern in (
             rf"{number}\s+{keyword}\b",
