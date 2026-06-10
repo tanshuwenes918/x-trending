@@ -255,9 +255,11 @@ class FeishuExporter:
         except (TypeError, ValueError):
             number = 0
         if number >= 1_000_000:
-            return f"{number / 1_000_000:.1f}M".rstrip("0").rstrip(".")
+            compact = f"{number / 1_000_000:.1f}".rstrip("0").rstrip(".")
+            return f"{compact}M"
         if number >= 1_000:
-            return f"{number / 1_000:.1f}K".rstrip("0").rstrip(".")
+            compact = f"{number / 1_000:.1f}".rstrip("0").rstrip(".")
+            return f"{compact}K"
         return str(number)
 
     def _section_number(self, index: int) -> str:
