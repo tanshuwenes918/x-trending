@@ -86,7 +86,7 @@ jobs:
           scrapling install
 
       - name: Run tests
-        run: pytest -q
+        run: pytest -q tests
 
       - name: Scrape and export
         run: python main.py
