@@ -271,14 +271,15 @@ class TrendingScraper:
         return list(tweets_by_url.values())[:MAX_CANDIDATES_PER_CATEGORY]
 
     def _extract_tweet(self, article) -> Dict[str, Any]:
+        metrics = self._extract_metrics(article)
         return {
             "author": self._extract_author(article),
             "content": self._extract_content(article),
             "created_at": self._extract_created_at(article),
-            "likes": self._extract_metric(article, "like"),
-            "retweets": self._extract_metric(article, "repost"),
-            "replies": self._extract_metric(article, "reply"),
-            "views": self._extract_metric(article, "view"),
+            "likes": metrics["like"],
+            "retweets": metrics["repost"],
+            "replies": metrics["reply"],
+            "views": metrics["view"],
             "media_urls": self._extract_media_urls(article),
             "tweet_url": self._extract_tweet_url(article),
         }
@@ -318,13 +319,17 @@ class TrendingScraper:
             "like": [
                 '[data-testid="like"]',
                 '[data-testid="unlike"]',
+                '[aria-label*="like" i]',
             ],
             "repost": [
                 '[data-testid="retweet"]',
                 '[data-testid="unretweet"]',
+                '[aria-label*="repost" i]',
+                '[aria-label*="retweet" i]',
             ],
             "reply": [
                 '[data-testid="reply"]',
+                '[aria-label*="reply" i]',
             ],
             "view": [
                 'a[href$="/analytics"]',
@@ -347,6 +352,20 @@ class TrendingScraper:
 
         return 0
 
+    def _extract_metrics(self, article) -> Dict[str, int]:
+        metrics = {
+            "reply": self._extract_metric(article, "reply"),
+            "repost": self._extract_metric(article, "repost"),
+            "like": self._extract_metric(article, "like"),
+            "view": self._extract_metric(article, "view"),
+        }
+
+        for metric, value in self._extract_action_group_metrics(article).items():
+            if not metrics.get(metric) and value:
+                metrics[metric] = value
+
+        return metrics
+
     def _metric_text_candidates(self, locator) -> List[str]:
         candidates = [
             self._safe_attr(locator, "aria-label"),
@@ -366,10 +385,10 @@ class TrendingScraper:
             return 0
 
         keyword_groups = {
-            "like": r"likes?|liked",
-            "repost": r"reposts?|retweets?|reposted|retweeted",
-            "reply": r"replies|reply",
-            "view": r"views?|view",
+            "like": r"likes?|liked|赞|喜歡|喜欢",
+            "repost": r"reposts?|retweets?|reposted|retweeted|转发|轉發",
+            "reply": r"replies|reply|评论|回覆|回复",
+            "view": r"views?|view|浏览|觀看|观看",
         }
         number = r"(\d+(?:[,.]\d+)?\s*[KkMmBb]?)"
         keyword = f"(?:{keyword_groups[metric]})"
@@ -386,6 +405,54 @@ class TrendingScraper:
             return self._compact_number_to_int(normalized)
 
         return 0
+
+    def _extract_action_group_metrics(self, article) -> Dict[str, int]:
+        """Infer metrics from X's compact action row when labels omit counts."""
+        values = self._action_group_numbers(article)
+        if not values:
+            return {}
+
+        if len(values) >= 4:
+            return {
+                "reply": values[0],
+                "repost": values[1],
+                "like": values[2],
+                "view": values[3],
+            }
+        if len(values) == 3:
+            return {
+                "repost": values[0],
+                "like": values[1],
+                "view": values[2],
+            }
+        if len(values) == 2:
+            return {
+                "repost": values[0],
+                "view": values[1],
+            }
+        return {}
+
+    def _action_group_numbers(self, article) -> List[int]:
+        candidates: List[int] = []
+        number_pattern = re.compile(r"^\d+(?:[,.]\d+)?\s*[KkMmBb]?$")
+
+        try:
+            groups = article.locator('[role="group"]').all()
+        except Exception:
+            groups = []
+
+        for group in groups:
+            text = self._safe_inner_text(group)
+            numbers = [
+                self._compact_number_to_int(part)
+                for part in re.split(r"\s+", text)
+                if number_pattern.fullmatch(part)
+            ]
+            numbers = [number for number in numbers if number > 0]
+            if len(numbers) > len(candidates):
+                candidates = numbers
+
+        return candidates
 
     def _clean_metric_text(self, value: str) -> str:
         return " ".join(str(value or "").replace("\xa0", " ").split())

@@ -13,7 +13,7 @@ class TestTrendingScraper:
     """Test cases for TrendingScraper."""
 
     def setup_method(self):
-        """Setup test fixtures."""
+        """Set up test fixtures."""
         self.scraper = TrendingScraper()
 
     def test_scraper_initialization(self):
@@ -32,6 +32,7 @@ class TestTrendingScraper:
         assert self.scraper._extract_metric_value("Likes 1,234", "like") == 1234
         assert self.scraper._extract_metric_value("18.9K", "view") == 18900
         assert self.scraper._extract_metric_value("1.2M views", "view") == 1200000
+        assert self.scraper._extract_metric_value("75K likes", "like") == 75000
 
 
 def test_data_processor_groups_and_ranks_recent_tweets():
@@ -83,10 +84,50 @@ def test_data_processor_groups_and_ranks_recent_tweets():
 
 
 def test_llm_processor_uses_fallback_without_config():
-    """Test missing LLM settings do not break the report."""
+    """Test missing LLM settings do not break the report when not required."""
     data = {"groups": [], "top_actions": []}
     result = LLMProcessor(api_key="", base_url="", model="", required=False).enrich(data)
     assert result["llm_used"] is False
+
+
+def test_llm_processor_filters_sensitive_top_actions():
+    """Test LLM top actions cannot point at sensitive-news source items."""
+    processor = LLMProcessor(api_key="", base_url="", model="", required=False)
+    data = {
+        "groups": [
+            {
+                "name": "News / Society / Sensitive Topics",
+                "items": [{"tweet_url": "https://x.com/news/status/1", "summary": "old"}],
+            },
+            {
+                "name": "Viral Culture / Meme / Social Buzz",
+                "items": [{"tweet_url": "https://x.com/meme/status/1", "summary": "old", "views": 1000}],
+            },
+        ],
+        "top_actions": [],
+    }
+    processor._merge_result(
+        data,
+        {
+            "groups": [],
+            "top_actions": [
+                {"title": "敏感新闻", "action": "做挑战", "tweet_url": "https://x.com/news/status/1"},
+                {"title": "低风险梗图", "action": "做模板", "tweet_url": "https://x.com/meme/status/1"},
+            ],
+        },
+    )
+
+    assert data["top_actions"] == [
+        {
+            "title": "低风险梗图",
+            "action": "做模板",
+            "tweet_url": "https://x.com/meme/status/1",
+            "likes": 0,
+            "retweets": 0,
+            "replies": 0,
+            "views": 1000,
+        }
+    ]
 
 
 def test_feishu_formatter_builds_daily_report():
@@ -107,7 +148,7 @@ def test_feishu_formatter_builds_daily_report():
                     "name": "AI / Tech / Creator Tools",
                     "items": [
                         {
-                            "summary": "AI music tools are getting attention.",
+                            "summary": "AI 音乐（工具热议）：创作者在讨论新工作流。",
                             "likes": 1200,
                             "retweets": 34,
                             "views": 56000,
@@ -118,9 +159,9 @@ def test_feishu_formatter_builds_daily_report():
             ],
             "top_actions": [
                 {
-                    "title": "AI music workflow",
-                    "action": "Make an AI music template that sends users to generate a similar result.",
-                    "likes": 1200,
+                    "title": "AI 音乐工作流",
+                    "action": "做一个同款 AI 音乐模板，引导用户生成类似效果。",
+                    "likes": 0,
                     "retweets": 34,
                     "views": 56000,
                     "tweet_url": "https://x.com/u/status/1",
@@ -130,13 +171,14 @@ def test_feishu_formatter_builds_daily_report():
     )
 
     content = message["content"]["post"]["zh_cn"]["content"]
-    assert message["msg_type"] == "post"
-    assert "X" in content[0][0]["text"]
+    title = message["content"]["post"]["zh_cn"]["title"]
     flattened_text = "".join(part["text"] for block in content for part in block)
+
+    assert message["msg_type"] == "post"
+    assert title.startswith("X 趋势日报 | AI 视频 & AI 音乐")
+    assert "X 趋势日报" not in flattened_text
     assert "摘要：" not in flattened_text
     assert "链接：" not in flattened_text
-    assert "数据范围：" not in flattened_text
-    assert "国家：" not in flattened_text
-    assert "每类最多：" not in flattened_text
-    assert "（" in flattened_text
+    assert "0赞" not in flattened_text
     assert "1.2K赞 + 34转 + 56K浏览" in flattened_text
+    assert "34转 + 56K浏览" in flattened_text

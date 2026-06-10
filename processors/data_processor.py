@@ -21,14 +21,7 @@ class DataProcessor:
     """Process scraped tweets into the daily operations report shape."""
 
     def process(self, raw_data: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> Dict[str, Any]:
-        """Process raw scraped data.
-
-        Args:
-            raw_data: Raw data from scraper.
-
-        Returns:
-            Processed data ready for LLM enrichment and Feishu export.
-        """
+        """Process raw scraped data."""
         logger.info("Processing scraped data...")
 
         now = datetime.now(ZoneInfo(TIMEZONE))
@@ -179,6 +172,8 @@ class DataProcessor:
     def _fallback_top_actions(self, groups: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         candidates = []
         for group in groups:
+            if group.get("name") == "News / Society / Sensitive Topics":
+                continue
             candidates.extend(group.get("items", []))
 
         actions = []
@@ -189,7 +184,7 @@ class DataProcessor:
                 {
                     "title": self._headline_from_content(item.get("content", ""))
                     or self._category_label(item.get("trending_term", "")),
-                    "action": "把这条热度内容改成短视频模板或音乐生成挑战，用同款效果引导用户到平台生成。",
+                    "action": "把这条热度内容改成 AI 音乐/AI 视频模板挑战，提供口播、BGM 和分镜素材包，并用评论区关键词引导用户到生成页。",
                     "tweet_url": item.get("tweet_url", ""),
                     "likes": item.get("likes", 0),
                     "retweets": item.get("retweets", 0),
@@ -206,7 +201,7 @@ class DataProcessor:
         if self._is_mostly_ascii(text):
             return self._english_headline(text)
 
-        separators = ["。", ".", "!", "?", "！", "？", "：", ":"]
+        separators = ["。", ".", "!", "?", "！", "？", "；", ":"]
         first_sentence = text
         for separator in separators:
             if separator in first_sentence:
@@ -229,23 +224,23 @@ class DataProcessor:
             subject = self._truncate(brand_match.group(1), 18)
             return f"{subject}热度上升"
 
-        return "海外热帖发酵"
+        return "海外热点发酵"
 
     def _fallback_description(self, content: str) -> str:
         text = self._clean_text(content)
         if not text:
-            return "该推文热度较高，可作为今日内容素材观察。"
+            return "该推文热度较高，可作为今日 AI 音乐/AI 视频素材观察。"
 
         lowered = text.lower()
         if any(keyword in lowered for keyword in ["launch", "introducing", "released", "trailer", "announced"]):
-            return "原推文发布了一个新产品、新预告或新消息，适合观察用户对新鲜内容的反应。"
+            return "原推文发布了新产品、新预告或新消息，适合拆成短视频资讯、口播脚本或 BGM 情绪模板。"
         if any(keyword in lowered for keyword in ["ai", "model", "tool", "app", "workflow"]):
-            return "原推文讨论 AI、工具或创作流程变化，适合评估能否转成生成式内容素材。"
+            return "原推文讨论 AI、工具或创作流程变化，适合评估能否转成产品演示、教程短视频或生成模板。"
         if any(keyword in lowered for keyword in ["music", "song", "dance", "video", "movie", "anime"]):
-            return "原推文围绕音乐、视频或娱乐内容发酵，适合作为站外短内容参考。"
+            return "原推文围绕音乐、视频或娱乐内容发酵，适合作为 AI 配乐、AI MV 或角色配音挑战参考。"
         if any(keyword in lowered for keyword in ["meme", "viral", "trend"]):
-            return "原推文呈现社媒热点或梗传播，适合观察是否能做成低门槛二创模板。"
-        return "原推文正在获得较高互动，可作为今日热点素材池候选。"
+            return "原推文呈现社媒热点或梗传播，适合观察是否能做成低门槛二创视频模板。"
+        return "原推文正在获得较高互动，可作为今日 AI 音乐/AI 视频热点素材池候选。"
 
     def _category_label(self, value: str) -> str:
         labels = {
@@ -257,7 +252,7 @@ class DataProcessor:
             "dance": "舞蹈热点",
             "celebrity": "明星娱乐",
             "movies&tv": "影视话题",
-            "anime": "动漫话题",
+            "anime": "动画话题",
             "meme": "梗文化",
             "relationship": "社交关系",
             "fashion": "时尚话题",
@@ -307,6 +302,9 @@ class DataProcessor:
             text = text[:-1]
         elif text.lower().endswith("m"):
             multiplier = 1_000_000
+            text = text[:-1]
+        elif text.lower().endswith("b"):
+            multiplier = 1_000_000_000
             text = text[:-1]
 
         try:
