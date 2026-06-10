@@ -13,6 +13,7 @@ from config.settings import (
     LLM_MODEL,
     LLM_REQUEST_TIMEOUT,
     LLM_REQUIRED,
+    LLM_USER_AGENT,
     TOP_ACTION_COUNT,
 )
 
@@ -117,7 +118,9 @@ class LLMProcessor:
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
+                "Accept": "application/json",
                 "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": LLM_USER_AGENT,
             },
             method="POST",
         )

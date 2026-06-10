@@ -127,6 +127,7 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "")
 LLM_ENABLED = _bool_env("LLM_ENABLED", True)
 LLM_REQUIRED = _bool_env("LLM_REQUIRED", True)
+LLM_USER_AGENT = os.getenv("LLM_USER_AGENT", "OpenAI/Python 1.0")
 
 # Debug mode
 DEBUG = _bool_env("DEBUG", False)
