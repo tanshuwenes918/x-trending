@@ -177,6 +177,8 @@ def test_feishu_formatter_builds_daily_report():
     assert message["msg_type"] == "post"
     assert title.startswith("X 趋势日报 | AI 视频 & AI 音乐")
     assert "X 趋势日报" not in flattened_text
+    assert "—— 一、AI / Tech / Creator Tools ——" in flattened_text
+    assert "【AI 工具】" in flattened_text
     assert "摘要：" not in flattened_text
     assert "链接：" not in flattened_text
     assert "0赞" not in flattened_text
