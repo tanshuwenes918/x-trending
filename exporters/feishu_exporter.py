@@ -56,7 +56,6 @@ class FeishuExporter:
         for index, group in enumerate(data.get("groups", []), start=1):
             group_name = group.get("name", "")
             blocks.append(self._text_line(f"\n—— {self._section_number(index)}、{group_name} ——"))
-            blocks.append(self._text_line(f"【{self._group_tag(group_name)}】"))
             items = group.get("items", [])
             if not items:
                 blocks.append(self._text_line("暂无符合条件的推文。"))
@@ -76,7 +75,6 @@ class FeishuExporter:
         blocks.append(
             self._text_line(f"\n—— {self._section_number(action_section_index)}、最值得跟进的 5 个引流动作 ——")
         )
-        blocks.append(self._text_line("【引流动作】"))
         top_actions = data.get("top_actions", [])
         if not top_actions:
             blocks.append(self._text_line("暂无可推荐的引流动作。"))
@@ -103,7 +101,6 @@ class FeishuExporter:
         for index, group in enumerate(data.get("groups", []), start=1):
             group_name = group.get("name", "")
             lines.append(f"—— {self._section_number(index)}、{group_name} ——")
-            lines.append(f"【{self._group_tag(group_name)}】")
             items = group.get("items", [])
             if not items:
                 lines.append("暂无符合条件的推文。")
@@ -114,7 +111,6 @@ class FeishuExporter:
 
         action_section_index = len(data.get("groups", [])) + 1
         lines.append(f"—— {self._section_number(action_section_index)}、最值得跟进的 5 个引流动作 ——")
-        lines.append("【引流动作】")
         top_actions = data.get("top_actions", [])
         if not top_actions:
             lines.append("暂无可推荐的引流动作。")
@@ -262,17 +258,6 @@ class FeishuExporter:
 
     def _report_title(self, timestamp: str) -> str:
         return f"X 趋势日报 | AI 视频 & AI 音乐 {timestamp}".strip()
-
-    def _group_tag(self, group_name: str) -> str:
-        tags = {
-            "AI / Tech / Creator Tools": "AI 工具",
-            "Music / Dance / Entertainment": "音乐娱乐",
-            "Viral Culture / Meme / Social Buzz": "社媒热点",
-            "Gaming / Sports / Youth Culture": "游戏体育",
-            "Lifestyle / Outdoor / Travel": "生活方式",
-            "News / Society / Sensitive Topics": "新闻社会",
-        }
-        return tags.get(group_name, "热点观察")
 
     def _truncate(self, text: Any, limit: int) -> str:
         value = " ".join(str(text or "").split())
