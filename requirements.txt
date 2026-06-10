@@ -6,6 +6,7 @@ python-dotenv>=0.20.0
 tzdata>=2024.1
 
 # Scraping
+playwright>=1.45.0
 scrapling[fetchers]>=0.4.9,<0.5.0
 selenium>=4.0.0
 scrapy>=2.7.0

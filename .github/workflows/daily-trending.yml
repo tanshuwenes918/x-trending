@@ -21,6 +21,7 @@ on:
           - feishu
           - json
           - both
+          - preview
         default: "feishu"
       dry_run:
         description: "Skip Feishu export"
@@ -43,15 +44,19 @@ jobs:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
       LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      LLM_ENABLED: "true"
+      LLM_REQUIRED: "true"
       X_COOKIES: ${{ secrets.X_COOKIES }}
       X_COUNTRIES: ${{ inputs.countries || 'Global' }}
       X_CATEGORIES: ${{ inputs.categories || 'Technology,News,Business & Finance,Science,Travel,Gaming,Sports,Health & Fitness,cryptocurrency,cars,music,dance,celebrity,relationship,Movies & TV,Nature & Outdoors,food,meme,beauty,Pets,fashion,anime,religion,Home & Garden' }}
+      X_EXPLORE_URL: https://x.com/i/jf/global-trending/home
       OUTPUT_FORMAT: ${{ inputs.output_format || 'feishu' }}
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
       OUTPUT_DIR: outputs
       TIMEZONE: Asia/Shanghai
       MAX_TRENDS_PER_CATEGORY: 10
       MAX_TWEETS_PER_TREND: 5
+      LLM_REQUEST_TIMEOUT: 300
       MAX_CANDIDATES_PER_CATEGORY: 30
       SCROLLS_PER_CATEGORY: 7
       MAX_ITEMS_PER_GROUP: 7

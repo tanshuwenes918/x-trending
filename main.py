@@ -26,7 +26,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run the X Trending scraper.")
     parser.add_argument(
         "--output-format",
-        choices=["feishu", "json", "both"],
+        choices=["feishu", "json", "both", "preview"],
         default=None,
         help="Override OUTPUT_FORMAT for this run.",
     )
@@ -34,6 +34,11 @@ def parse_args():
         "--dry-run",
         action="store_true",
         help="Scrape and write JSON without sending to Feishu.",
+    )
+    parser.add_argument(
+        "--input-json",
+        default="",
+        help="Load an existing processed JSON file instead of scraping. Use 'latest' for the newest outputs/x_trending_*.json.",
     )
     return parser.parse_args()
 
@@ -50,6 +55,30 @@ def write_json_output(data: dict) -> Path:
         encoding="utf-8",
     )
     return output_path
+
+
+def resolve_input_json(value: str) -> Path:
+    """Resolve an input JSON path, with 'latest' as a convenience alias."""
+    from config.settings import OUTPUT_DIR
+
+    if value.lower() == "latest":
+        candidates = sorted(
+            OUTPUT_DIR.glob("x_trending_*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            raise FileNotFoundError(f"No x_trending_*.json files found in {OUTPUT_DIR}")
+        return candidates[0]
+
+    return Path(value)
+
+
+def read_json_input(input_path: Path) -> dict:
+    """Read a processed JSON file."""
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input JSON not found: {input_path}")
+    return json.loads(input_path.read_text(encoding="utf-8"))
 
 
 def main():
@@ -79,14 +108,22 @@ def main():
         llm_processor = LLMProcessor()
         exporter = FeishuExporter()
         
-        # Scrape, process, persist, and export data
-        raw_data = scraper.scrape_all()
-        trending_data = processor.process(raw_data)
+        # Scrape or load, enrich, persist, and export data
+        if args.input_json:
+            input_path = resolve_input_json(args.input_json)
+            logger.info("Loading existing JSON input from %s", input_path)
+            trending_data = read_json_input(input_path)
+        else:
+            raw_data = scraper.scrape_all()
+            trending_data = processor.process(raw_data)
+
         trending_data = llm_processor.enrich(trending_data)
         output_path = write_json_output(trending_data)
         logger.info("Wrote JSON output to %s", output_path)
 
-        if output_format in {"feishu", "both"} and not dry_run:
+        if output_format == "preview":
+            print(exporter.format_plain_text(trending_data))
+        elif output_format in {"feishu", "both"} and not dry_run:
             if not exporter.export(trending_data):
                 raise RuntimeError("Failed to export data to Feishu")
         else:

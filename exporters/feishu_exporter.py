@@ -75,8 +75,13 @@ class FeishuExporter:
 
             for item_index, item in enumerate(items, start=1):
                 summary_text = self._truncate(item.get("summary", ""), 140)
-                blocks.append(self._text_line(f"{item_index}. 摘要：{summary_text}"))
-                blocks.append(self._link_line("   链接：原推文", item.get("tweet_url", "")))
+                blocks.append(
+                    self._text_with_metrics_and_link(
+                        f"{item_index}. {summary_text}",
+                        item,
+                        item.get("tweet_url", ""),
+                    )
+                )
 
         action_section_index = len(data.get("groups", [])) + 1
         blocks.append(
@@ -86,11 +91,56 @@ class FeishuExporter:
         if not top_actions:
             blocks.append(self._text_line("暂无可推荐的引流动作。"))
         for index, action in enumerate(top_actions, start=1):
-            blocks.append(self._text_line(f"{index}. 标题：{self._truncate(action.get('title', ''), 60)}"))
-            blocks.append(self._text_line(f"   引流动作：{self._truncate(action.get('action', ''), 140)}"))
-            blocks.append(self._link_line("   链接：原推文", action.get("tweet_url", "")))
+            title = self._truncate(action.get("title", ""), 60)
+            action_text = self._truncate(action.get("action", ""), 140)
+            blocks.append(
+                self._text_with_metrics_and_link(
+                    f"{index}. {title}：{action_text}",
+                    action,
+                    action.get("tweet_url", ""),
+                )
+            )
 
         return self._chunk_blocks(blocks, timestamp)
+
+    def format_plain_text(self, data: Dict[str, Any]) -> str:
+        """Format processed data as readable plain text for local preview."""
+        summary = data.get("summary", {})
+        countries = ", ".join(data.get("countries", [])) or "Global"
+        lines = [
+            "X 趋势日报 | AI 视频 & AI 音乐",
+            "",
+            f"数据范围：过去 {data.get('lookback_hours', 24)} 小时",
+            f"国家：{countries}",
+            "每类最多：{max_items} 条 | 入选推文：{eligible} | LLM：{llm}".format(
+                max_items=summary.get("max_items_per_group", 7),
+                eligible=summary.get("eligible_tweet_count", 0),
+                llm="已启用" if data.get("llm_used") else "未启用",
+            ),
+            "",
+        ]
+
+        for index, group in enumerate(data.get("groups", []), start=1):
+            lines.append(f"{self._section_number(index)}、{group.get('name', '')}")
+            items = group.get("items", [])
+            if not items:
+                lines.append("暂无符合条件的推文。")
+            for item_index, item in enumerate(items, start=1):
+                summary_text = self._truncate(item.get("summary", ""), 140)
+                lines.append(f"{item_index}. {summary_text}{self._plain_metrics_and_url(item)}")
+            lines.append("")
+
+        action_section_index = len(data.get("groups", [])) + 1
+        lines.append(f"{self._section_number(action_section_index)}、最值得跟进的 5 个引流动作")
+        top_actions = data.get("top_actions", [])
+        if not top_actions:
+            lines.append("暂无可推荐的引流动作。")
+        for index, action in enumerate(top_actions, start=1):
+            title = self._truncate(action.get("title", ""), 60)
+            action_text = self._truncate(action.get("action", ""), 140)
+            lines.append(f"{index}. {title}：{action_text}{self._plain_metrics_and_url(action)}")
+
+        return "\n".join(lines)
 
     def _post_message(self, message: Dict[str, Any]) -> bool:
         """Post message to Feishu webhook."""
@@ -165,6 +215,50 @@ class FeishuExporter:
         if not href:
             return self._text_line(text)
         return [{"tag": "a", "text": text, "href": href}]
+
+    def _text_with_metrics_and_link(
+        self,
+        text: str,
+        item: Dict[str, Any],
+        href: str,
+    ) -> List[Dict[str, str]]:
+        metrics_text = self._metrics_text(item)
+        if not href:
+            suffix = f"（{metrics_text}）" if metrics_text else ""
+            return self._text_line(f"{text}{suffix}")
+        return [
+            {"tag": "text", "text": f"{text}（{metrics_text}；" if metrics_text else f"{text}（"},
+            {"tag": "a", "text": href, "href": href},
+            {"tag": "text", "text": "）"},
+        ]
+
+    def _plain_metrics_and_url(self, item: Dict[str, Any]) -> str:
+        metrics_text = self._metrics_text(item)
+        href = item.get("tweet_url", "")
+        if metrics_text and href:
+            return f"（{metrics_text}；{href}）"
+        if metrics_text:
+            return f"（{metrics_text}）"
+        if href:
+            return f"（{href}）"
+        return ""
+
+    def _metrics_text(self, item: Dict[str, Any]) -> str:
+        likes = self._format_number(item.get("likes", 0))
+        retweets = self._format_number(item.get("retweets", 0))
+        views = self._format_number(item.get("views", 0))
+        return f"{likes}赞 + {retweets}转 + {views}浏览"
+
+    def _format_number(self, value: Any) -> str:
+        try:
+            number = int(float(value or 0))
+        except (TypeError, ValueError):
+            number = 0
+        if number >= 1_000_000:
+            return f"{number / 1_000_000:.1f}M".rstrip("0").rstrip(".")
+        if number >= 1_000:
+            return f"{number / 1_000:.1f}K".rstrip("0").rstrip(".")
+        return str(number)
 
     def _section_number(self, index: int) -> str:
         numbers = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]

@@ -1,18 +1,34 @@
 # X Trending
 
-Daily X trend pipeline for AI video and AI music growth operations.
+Daily X Global Trending pipeline for AI video and AI music growth operations.
 
 ## Flow
 
 1. Open X Global Trending with Playwright.
 2. Inject `X_COOKIES` to keep the X login session.
-3. Click each configured category card.
+3. Click each configured category.
 4. Scroll the Popular today area to collect tweet candidates.
 5. Keep tweets from the past 24 hours.
 6. Merge source categories into 6 operating groups.
 7. Keep the hottest 7 tweets in each group.
-8. Optionally use an OpenAI-compatible LLM for summaries and traffic actions.
+8. Use an OpenAI-compatible LLM to write Chinese summaries and traffic actions.
 9. Send the report to Feishu and save a JSON copy.
+
+## Scraped Fields
+
+Each tweet candidate includes:
+
+- author
+- created_at
+- content
+- replies
+- retweets
+- likes
+- views
+- media_urls
+- tweet_url
+
+The processor also adds `country`, `source_category`, `trending_term`, and `score`.
 
 ## Feishu Output
 
@@ -21,32 +37,16 @@ X 趋势日报 | AI 视频 & AI 音乐
 
 数据范围：过去 24 小时
 国家：Global
-每类最多：7 条
+每类最多：7 条 | 入选推文：42 | LLM：已启用
 
 一、AI / Tech / Creator Tools
-1. 摘要：...
-   链接：原推文
+1. 科技趋势（Claude Fable 5新消息）：Claude 发布新模型相关消息，适合观察创作者对 AI 工具升级的反应。（89.6K赞 + 20.9K转 + 30.1M浏览；https://x.com/...）
 
 二、Music / Dance / Entertainment
-1. 摘要：...
-   链接：原推文
-
-三、Viral Culture / Meme / Social Buzz
-...
-
-四、Gaming / Sports / Youth Culture
-...
-
-五、Lifestyle / Outdoor / Travel
-...
-
-六、News / Society / Sensitive Topics
 ...
 
 七、最值得跟进的 5 个引流动作
-1. 标题：...
-   引流动作：...
-   链接：原推文
+1. AI MV模板挑战：把该热点改成短视频模板挑战，引导用户生成同款 AI 视频或 AI 音乐。（12.3K赞 + 2.1K转 + 1.8M浏览；https://x.com/...）
 ```
 
 ## Category Groups
@@ -81,22 +81,46 @@ scrapling install
 copy .env.example .env
 ```
 
-Fill `.env`:
+Fill `.env` locally:
 
 ```dotenv
 X_COUNTRIES=Global
 X_EXPLORE_URL=https://x.com/i/jf/global-trending/home
 X_COOKIES=auth_token=...; ct0=...; guest_id=...
 
-OUTPUT_FORMAT=json
+LLM_ENABLED=true
+LLM_REQUIRED=true
+LLM_API_KEY=...
+LLM_BASE_URL=https://your-openai-compatible-endpoint
+LLM_MODEL=...
+LLM_REQUEST_TIMEOUT=300
+
+OUTPUT_FORMAT=preview
 DRY_RUN=true
-LLM_ENABLED=false
 ```
 
-Dry run:
+Preview without sending Feishu:
 
 ```bash
-python main.py --output-format json --dry-run
+python main.py --output-format preview --dry-run
+```
+
+Preview from the latest local JSON without scraping X again:
+
+```bash
+python main.py --input-json latest --output-format preview --dry-run
+```
+
+Send the latest local JSON to Feishu without scraping X again:
+
+```bash
+python main.py --input-json latest --output-format feishu
+```
+
+Send to Feishu after configuring `FEISHU_WEBHOOK_URL`:
+
+```bash
+python main.py --output-format feishu
 ```
 
 Check category clicking:
@@ -114,19 +138,19 @@ It runs every day at `00:30 UTC`, which is `08:30 Asia/Shanghai`, and can also b
 Required repository secrets:
 
 - `X_COOKIES`
-- `FEISHU_WEBHOOK_URL` if exporting to Feishu
+- `LLM_API_KEY`
+- `LLM_BASE_URL`
+- `LLM_MODEL`
+- `FEISHU_WEBHOOK_URL`
 
 Optional repository secrets:
 
 - `FEISHU_SECRET`
-- `LLM_API_KEY`
-- `LLM_BASE_URL`
-- `LLM_MODEL`
 
-Do not put API keys or X cookies in source files, README, `.env.example`, or normal GitHub variables.
+Do not put API keys, X cookies, or Feishu webhook URLs in source files, README, `.env.example`, or normal GitHub variables.
 
 ## Notes
 
-GitHub Actions can run this automatically. The runner installs Python dependencies and Playwright browsers each run; browser files are cached with `actions/cache` to reduce repeated download time.
+GitHub Actions runs on a fresh Linux runner each time. The workflow installs Python dependencies and Playwright browsers, with browser files cached by `actions/cache` to reduce repeated downloads.
 
-X cookies expire or may be invalidated after logout/password changes. If Actions starts redirecting to login, update the `X_COOKIES` secret.
+X cookies can expire or be invalidated after logout/password changes. If Actions starts redirecting to login, update the `X_COOKIES` secret.

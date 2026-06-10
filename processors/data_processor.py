@@ -1,6 +1,7 @@
 """Data processing and transformation logic."""
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -170,8 +171,10 @@ class DataProcessor:
         return likes * 2 + retweets * 4 + replies * 3
 
     def _fallback_summary(self, tweet: Dict[str, Any], trend_term: str) -> str:
-        prefix = f"{trend_term}: " if trend_term else ""
-        return self._truncate(prefix + tweet.get("content", ""), 110)
+        headline = self._headline_from_content(tweet.get("content", "")) or "热门动态"
+        topic = self._category_label(trend_term)
+        description = self._fallback_description(tweet.get("content", ""))
+        return self._truncate(f"{topic}（{headline}）：{description}", 120)
 
     def _fallback_top_actions(self, groups: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         candidates = []
@@ -184,12 +187,100 @@ class DataProcessor:
                 break
             actions.append(
                 {
-                    "title": item.get("trending_term") or self._truncate(item.get("content", ""), 28),
-                    "action": "可改造成 AI 视频或 AI 音乐生成素材，用原趋势做站外内容钩子，引导用户到平台生成同款。",
+                    "title": self._headline_from_content(item.get("content", ""))
+                    or self._category_label(item.get("trending_term", "")),
+                    "action": "把这条热度内容改成短视频模板或音乐生成挑战，用同款效果引导用户到平台生成。",
                     "tweet_url": item.get("tweet_url", ""),
+                    "likes": item.get("likes", 0),
+                    "retweets": item.get("retweets", 0),
+                    "replies": item.get("replies", 0),
+                    "views": item.get("views", 0),
                 }
             )
         return actions
+
+    def _headline_from_content(self, content: str) -> str:
+        text = self._clean_text(content)
+        if not text:
+            return ""
+        if self._is_mostly_ascii(text):
+            return self._english_headline(text)
+
+        separators = ["。", ".", "!", "?", "！", "？", "：", ":"]
+        first_sentence = text
+        for separator in separators:
+            if separator in first_sentence:
+                first_sentence = first_sentence.split(separator, 1)[0]
+        return self._truncate(first_sentence, 28)
+
+    def _english_headline(self, text: str) -> str:
+        normalized = self._clean_text(text)
+        introducing_match = re.search(
+            r"\b(?:introducing|launching|announcing|released?|new trailer for)\s+(.+?)(?:[:.!?]|$)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if introducing_match:
+            subject = self._truncate(introducing_match.group(1).strip(" \"'"), 18)
+            return f"{subject}新消息" if subject else "海外新品发布"
+
+        brand_match = re.search(r"\b([A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){0,3})\b", normalized)
+        if brand_match:
+            subject = self._truncate(brand_match.group(1), 18)
+            return f"{subject}热度上升"
+
+        return "海外热帖发酵"
+
+    def _fallback_description(self, content: str) -> str:
+        text = self._clean_text(content)
+        if not text:
+            return "该推文热度较高，可作为今日内容素材观察。"
+
+        lowered = text.lower()
+        if any(keyword in lowered for keyword in ["launch", "introducing", "released", "trailer", "announced"]):
+            return "原推文发布了一个新产品、新预告或新消息，适合观察用户对新鲜内容的反应。"
+        if any(keyword in lowered for keyword in ["ai", "model", "tool", "app", "workflow"]):
+            return "原推文讨论 AI、工具或创作流程变化，适合评估能否转成生成式内容素材。"
+        if any(keyword in lowered for keyword in ["music", "song", "dance", "video", "movie", "anime"]):
+            return "原推文围绕音乐、视频或娱乐内容发酵，适合作为站外短内容参考。"
+        if any(keyword in lowered for keyword in ["meme", "viral", "trend"]):
+            return "原推文呈现社媒热点或梗传播，适合观察是否能做成低门槛二创模板。"
+        return "原推文正在获得较高互动，可作为今日热点素材池候选。"
+
+    def _category_label(self, value: str) -> str:
+        labels = {
+            "technology": "科技趋势",
+            "science": "科学话题",
+            "business&finance": "商业科技",
+            "cryptocurrency": "加密话题",
+            "music": "音乐热点",
+            "dance": "舞蹈热点",
+            "celebrity": "明星娱乐",
+            "movies&tv": "影视话题",
+            "anime": "动漫话题",
+            "meme": "梗文化",
+            "relationship": "社交关系",
+            "fashion": "时尚话题",
+            "beauty": "美妆话题",
+            "food": "美食话题",
+            "pets": "宠物话题",
+            "gaming": "游戏热点",
+            "sports": "体育热点",
+            "cars": "汽车话题",
+            "travel": "旅行话题",
+            "nature&outdoors": "户外话题",
+            "health&fitness": "健康健身",
+            "home&garden": "家居生活",
+            "news": "新闻社会",
+            "religion": "宗教社会",
+        }
+        return labels.get(self._normalize(value), self._clean_text(value) or "热门话题")
+
+    def _is_mostly_ascii(self, text: str) -> bool:
+        if not text:
+            return False
+        ascii_count = sum(1 for char in text if ord(char) < 128)
+        return ascii_count / len(text) > 0.75
 
     def _clean_text(self, value: Any) -> str:
         if value is None:

@@ -97,6 +97,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -135,3 +137,7 @@ dmypy.json
 *.json
 data/
 output/
+outputs/
+test-results/
+playwright-report/
+twitter-cli-main/

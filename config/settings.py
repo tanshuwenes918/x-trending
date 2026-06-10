@@ -107,6 +107,7 @@ FEISHU_SECRET = os.getenv("FEISHU_SECRET", "")
 # Scraping configuration
 SCRAPE_INTERVAL = _int_env("SCRAPE_INTERVAL", 3600)
 REQUEST_TIMEOUT = _int_env("REQUEST_TIMEOUT", 30)
+LLM_REQUEST_TIMEOUT = _int_env("LLM_REQUEST_TIMEOUT", 300)
 MAX_RETRIES = _int_env("MAX_RETRIES", 3)
 MAX_TRENDS_PER_CATEGORY = _int_env("MAX_TRENDS_PER_CATEGORY", 10)
 MAX_TWEETS_PER_TREND = _int_env("MAX_TWEETS_PER_TREND", 5)
@@ -125,6 +126,7 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "")
 LLM_ENABLED = _bool_env("LLM_ENABLED", True)
+LLM_REQUIRED = _bool_env("LLM_REQUIRED", True)
 
 # Debug mode
 DEBUG = _bool_env("DEBUG", False)
@@ -144,6 +146,6 @@ TWEET_FIELDS = [
 ]
 
 # Output format
-OUTPUT_FORMAT = os.getenv("OUTPUT_FORMAT", "feishu")  # feishu, json, both
+OUTPUT_FORMAT = os.getenv("OUTPUT_FORMAT", "feishu")  # feishu, json, both, preview
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "outputs"))
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Shanghai")

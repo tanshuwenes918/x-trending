@@ -69,6 +69,8 @@ def test_data_processor_groups_and_ranks_recent_tweets():
     assert len(tech_group["items"]) == 1
     assert tech_group["items"][0]["likes"] == 1200
     assert tech_group["items"][0]["summary"]
+    assert "（" in tech_group["items"][0]["summary"]
+    assert "）：" in tech_group["items"][0]["summary"]
     assert result["summary"]["eligible_tweet_count"] == 1
     assert len(result["top_actions"]) == 1
 
@@ -76,7 +78,7 @@ def test_data_processor_groups_and_ranks_recent_tweets():
 def test_llm_processor_uses_fallback_without_config():
     """Test missing LLM settings do not break the report."""
     data = {"groups": [], "top_actions": []}
-    result = LLMProcessor(api_key="", base_url="", model="").enrich(data)
+    result = LLMProcessor(api_key="", base_url="", model="", required=False).enrich(data)
     assert result["llm_used"] is False
 
 
@@ -99,6 +101,9 @@ def test_feishu_formatter_builds_daily_report():
                     "items": [
                         {
                             "summary": "AI music tools are getting attention.",
+                            "likes": 1200,
+                            "retweets": 34,
+                            "views": 56000,
                             "tweet_url": "https://x.com/u/status/1",
                         }
                     ],
@@ -108,6 +113,9 @@ def test_feishu_formatter_builds_daily_report():
                 {
                     "title": "AI music workflow",
                     "action": "Make an AI music template that sends users to generate a similar result.",
+                    "likes": 1200,
+                    "retweets": 34,
+                    "views": 56000,
                     "tweet_url": "https://x.com/u/status/1",
                 }
             ],
@@ -117,3 +125,8 @@ def test_feishu_formatter_builds_daily_report():
     content = message["content"]["post"]["zh_cn"]["content"]
     assert message["msg_type"] == "post"
     assert "X" in content[0][0]["text"]
+    flattened_text = "".join(part["text"] for block in content for part in block)
+    assert "摘要：" not in flattened_text
+    assert "链接：" not in flattened_text
+    assert "（" in flattened_text
+    assert "1.2K赞 + 34转 + 56K浏览" in flattened_text
