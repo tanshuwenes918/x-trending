@@ -110,7 +110,17 @@ class LLMProcessor:
         body = {
             "model": self.model,
             "instructions": prompt,
-            "input": json.dumps(payload, ensure_ascii=False),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": json.dumps(payload, ensure_ascii=False),
+                        }
+                    ],
+                }
+            ],
         }
 
         req = request.Request(
