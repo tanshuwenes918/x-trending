@@ -51,7 +51,7 @@ class LLMProcessor:
 
         try:
             payload = self._build_payload(data)
-            result = self._chat_json(payload)
+            result = self._responses_json(payload)
             self._merge_result(data, result)
             data["llm_used"] = True
         except Exception as exc:
@@ -89,7 +89,7 @@ class LLMProcessor:
             groups.append({"name": group.get("name", ""), "items": items})
         return {"groups": groups}
 
-    def _chat_json(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _responses_json(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         prompt = (
             "你是一个 AI 音乐生成与 AI 视频生成产品的站外增长运营负责人，产品类似 Vanso，目标是从 X 等站外平台找到可转化的内容机会。"
             "请基于输入的 X 热门推文生成简洁中文日报素材。所有输出必须是中文，并优先服务于运营选题、素材生产、评论区导流和落地页转化。"
@@ -109,16 +109,12 @@ class LLMProcessor:
         )
         body = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
+            "instructions": prompt,
+            "input": json.dumps(payload, ensure_ascii=False),
         }
 
         req = request.Request(
-            self._chat_completions_url(),
+            self._responses_url(),
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -138,13 +134,13 @@ class LLMProcessor:
             raise RuntimeError(f"LLM request failed: {exc}") from exc
 
         response_data = json.loads(response_body)
-        content = response_data["choices"][0]["message"]["content"]
+        content = self._responses_output_text(response_data)
         return self._parse_json_content(content)
 
-    def _chat_completions_url(self) -> str:
+    def _responses_url(self) -> str:
         if self.base_url.endswith("/v1"):
-            return f"{self.base_url}/chat/completions"
-        return f"{self.base_url}/v1/chat/completions"
+            return f"{self.base_url}/responses"
+        return f"{self.base_url}/v1/responses"
 
     def _models_url(self) -> str:
         if self.base_url.endswith("/v1"):
@@ -160,6 +156,20 @@ class LLMProcessor:
         if body:
             detail = f"{detail}; response={body[:800]}"
         return detail
+
+    def _responses_output_text(self, response_data: Dict[str, Any]) -> str:
+        """Extract text from a Responses API payload, including compatible gateways."""
+        output_text = response_data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text
+
+        for output in response_data.get("output", []):
+            for content in output.get("content", []):
+                text = content.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text
+
+        raise RuntimeError("Responses API response did not contain output text.")
 
     def _merge_result(self, data: Dict[str, Any], result: Dict[str, Any]) -> None:
         summaries_by_url = {}
