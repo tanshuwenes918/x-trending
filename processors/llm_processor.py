@@ -3,7 +3,8 @@
 import json
 import logging
 import re
-from typing import Any, Dict
+from itertools import chain
+from typing import Any, Dict, Iterable, Iterator, Tuple
 from urllib import request
 from urllib.error import HTTPError, URLError
 
@@ -109,6 +110,7 @@ class LLMProcessor:
         )
         body = {
             "model": self.model,
+            "stream": True,
             "instructions": prompt,
             "input": [
                 {
@@ -128,7 +130,7 @@ class LLMProcessor:
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
-                "Accept": "application/json",
+                "Accept": "text/event-stream, application/json",
                 "Content-Type": "application/json; charset=utf-8",
                 "User-Agent": LLM_USER_AGENT,
             },
@@ -137,15 +139,119 @@ class LLMProcessor:
 
         try:
             with request.urlopen(req, timeout=LLM_REQUEST_TIMEOUT) as response:
-                response_body = response.read().decode("utf-8")
+                content = self._read_responses_text(response)
         except HTTPError as exc:
             raise RuntimeError(f"LLM request failed: {self._http_error_detail(exc)}") from exc
         except URLError as exc:
             raise RuntimeError(f"LLM request failed: {exc}") from exc
 
-        response_data = json.loads(response_body)
-        content = self._responses_output_text(response_data)
         return self._parse_json_content(content)
+
+    def _read_responses_text(self, response: Any) -> str:
+        """Read SSE incrementally, tolerating gateways that return ordinary JSON."""
+        first_line = response.readline().removeprefix(b"\xef\xbb\xbf")
+        while first_line and not first_line.strip():
+            first_line = response.readline()
+        if not first_line:
+            raise RuntimeError("Responses API returned an empty response.")
+
+        # Inspect the body because some compatible gateways mislabel Content-Type.
+        if first_line.startswith((b"data:", b"event:", b":", b"id:", b"retry:")):
+            return self._responses_stream_text(chain([first_line], response))
+
+        response_data = json.loads((first_line + response.read()).decode("utf-8"))
+        self._check_response_status(response_data)
+        return self._responses_output_text(response_data)
+
+    def _iter_sse_events(self, lines: Iterable[bytes]) -> Iterator[Tuple[str, str]]:
+        """Decode SSE events, including comments, CRLF and multiline data fields."""
+        event_name = ""
+        data_lines = []
+        for raw_line in lines:
+            line = raw_line.decode("utf-8").rstrip("\r\n")
+            if not line:
+                if data_lines:
+                    yield event_name, "\n".join(data_lines)
+                event_name = ""
+                data_lines = []
+                continue
+            if line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if separator and value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                event_name = value
+            elif field == "data":
+                data_lines.append(value)
+
+        # A few gateways close immediately after the final data line.
+        if data_lines:
+            yield event_name, "\n".join(data_lines)
+
+    def _responses_stream_text(self, lines: Iterable[bytes]) -> str:
+        text_deltas = {}
+        finished_text = {}
+        for event_name, event_data in self._iter_sse_events(lines):
+            if event_data.strip() == "[DONE]":
+                break
+            event = json.loads(event_data)
+            if not isinstance(event, dict):
+                raise RuntimeError("Responses API stream event must be a JSON object.")
+            event_type = event.get("type") or event_name
+
+            if event_type in ("error", "response.failed", "response.incomplete", "response.cancelled"):
+                response_data = event.get("response") or {}
+                detail = (
+                    event.get("error")
+                    or response_data.get("error")
+                    or response_data.get("incomplete_details")
+                    or event.get("message")
+                    or event_type
+                )
+                raise RuntimeError(
+                    f"Responses API stream failed: {json.dumps(detail, ensure_ascii=False)[:800]}"
+                )
+
+            if event_type == "response.output_text.delta":
+                key = (event.get("output_index", 0), event.get("content_index", 0))
+                delta = event.get("delta")
+                if isinstance(delta, str):
+                    text_deltas.setdefault(key, []).append(delta)
+            elif event_type == "response.output_text.done":
+                key = (event.get("output_index", 0), event.get("content_index", 0))
+                text = event.get("text")
+                if isinstance(text, str):
+                    finished_text[key] = text
+            elif event_type == "response.completed":
+                response_data = event.get("response") or {}
+                self._check_response_status(response_data)
+                # Prefer the final response; adding it to deltas would duplicate text.
+                try:
+                    return self._responses_output_text(response_data)
+                except RuntimeError:
+                    # Some gateways omit text from the completion snapshot.
+                    pass
+                keys = sorted(set(text_deltas) | set(finished_text))
+                content = "".join(
+                    finished_text[key] if key in finished_text else "".join(text_deltas[key])
+                    for key in keys
+                )
+                if content.strip():
+                    return content
+                raise RuntimeError("Responses API stream completed without output text.")
+
+        raise RuntimeError("Responses API stream ended before response.completed; output may be incomplete.")
+
+    def _check_response_status(self, response_data: Dict[str, Any]) -> None:
+        if not isinstance(response_data, dict):
+            raise RuntimeError("Responses API response must be a JSON object.")
+        status = response_data.get("status")
+        if response_data.get("error") or (status and status != "completed"):
+            detail = response_data.get("error") or response_data.get("incomplete_details") or status
+            raise RuntimeError(
+                f"Responses API did not complete: {json.dumps(detail, ensure_ascii=False)[:800]}"
+            )
 
     def _responses_url(self) -> str:
         if self.base_url.endswith("/v1"):
@@ -173,11 +279,20 @@ class LLMProcessor:
         if isinstance(output_text, str) and output_text.strip():
             return output_text
 
+        text_parts = []
         for output in response_data.get("output", []):
+            if output.get("type") not in (None, "message"):
+                continue
             for content in output.get("content", []):
+                if content.get("type") not in (None, "output_text"):
+                    continue
                 text = content.get("text")
-                if isinstance(text, str) and text.strip():
-                    return text
+                if isinstance(text, str):
+                    text_parts.append(text)
+
+        output_text = "".join(text_parts)
+        if output_text.strip():
+            return output_text
 
         raise RuntimeError("Responses API response did not contain output text.")
 
