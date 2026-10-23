@@ -110,6 +110,10 @@ OUTPUT_FORMAT=preview
 DRY_RUN=true
 ```
 
+The LLM client tries Responses first. If that endpoint returns HTTP 404, it uses Chat Completions with the same model, source data, and summary instructions. Both APIs use streaming and also accept complete JSON responses from compatible gateways. Authentication errors, rate limits, overloads, and incomplete output still fail the run and preserve a retry input. An explicit `model_not_found` error does not trigger a protocol switch.
+
+Set `LLM_BASE_URL` to the service's base URL, such as `https://api.example.com` or `https://api.example.com/v1`, rather than a full `/responses` or `/chat/completions` endpoint. Switching back to a service that supports Responses requires no code changes.
+
 Preview without sending Feishu:
 
 ```bash

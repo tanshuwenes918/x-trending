@@ -141,11 +141,123 @@ class LLMProcessor:
             with request.urlopen(req, timeout=LLM_REQUEST_TIMEOUT) as response:
                 content = self._read_responses_text(response)
         except HTTPError as exc:
-            raise RuntimeError(f"LLM request failed: {self._http_error_detail(exc)}") from exc
+            try:
+                detail = self._http_error_detail(exc)
+            finally:
+                exc.close()
+            # Older compatible providers may only expose Chat Completions.
+            # A model lookup failure is not evidence that the endpoint is absent.
+            if exc.code == 404 and "model_not_found" not in detail.lower():
+                logger.info("Responses endpoint returned HTTP 404; trying Chat Completions")
+                return self._chat_completions_json(payload, prompt)
+            raise RuntimeError(f"LLM request failed: {detail}") from exc
         except URLError as exc:
             raise RuntimeError(f"LLM request failed: {exc}") from exc
 
         return self._parse_json_content(content)
+
+    def _chat_completions_json(self, payload: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+        """Use the same instructions and source data on a Chat-only provider."""
+        body = {
+            "model": self.model,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+        }
+        req = request.Request(
+            self._chat_completions_url(),
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "text/event-stream, application/json",
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": LLM_USER_AGENT,
+            },
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=LLM_REQUEST_TIMEOUT) as response:
+                content = self._read_chat_completions_text(response)
+        except HTTPError as exc:
+            try:
+                detail = self._http_error_detail(exc)
+            finally:
+                exc.close()
+            raise RuntimeError(f"Chat Completions request failed: {detail}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Chat Completions request failed: {exc}") from exc
+        return self._parse_json_content(content)
+
+    def _read_chat_completions_text(self, response: Any) -> str:
+        """Inspect the body so incorrectly labelled JSON/SSE responses also work."""
+        first_line = response.readline().removeprefix(b"\xef\xbb\xbf")
+        while first_line and not first_line.strip():
+            first_line = response.readline()
+        if not first_line:
+            raise RuntimeError("Chat Completions returned an empty response.")
+        if first_line.startswith((b"data:", b"event:", b":", b"id:", b"retry:")):
+            return self._chat_completions_stream_text(chain([first_line], response))
+        response_data = json.loads((first_line + response.read()).decode("utf-8"))
+        if not isinstance(response_data, dict):
+            raise RuntimeError("Chat Completions response must be a JSON object.")
+        if response_data.get("error"):
+            raise RuntimeError(f"Chat Completions failed: {json.dumps(response_data['error'], ensure_ascii=False)[:800]}")
+        choices = response_data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("Chat Completions response did not contain choices.")
+        for choice in choices:
+            if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+                raise RuntimeError("Chat Completions did not finish normally (expected finish_reason=stop).")
+        choice = next((item for item in choices if item.get("index", 0) == 0), None)
+        message = choice.get("message") if choice else None
+        if not isinstance(message, dict) or message.get("refusal"):
+            raise RuntimeError("Chat Completions did not contain a usable assistant message.")
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("Chat Completions response did not contain output text.")
+        return content
+
+    def _chat_completions_stream_text(self, lines: Iterable[bytes]) -> str:
+        """Require both a normal finish reason and the standard stream terminator."""
+        text_deltas = {}
+        finished = set()
+        for event_name, event_data in self._iter_sse_events(lines):
+            if event_data.strip() == "[DONE]":
+                if 0 not in finished or any(index not in finished for index in text_deltas):
+                    raise RuntimeError("Chat Completions stream ended without finish_reason=stop.")
+                content = "".join(text_deltas.get(0, []))
+                if not content.strip():
+                    raise RuntimeError("Chat Completions stream completed without output text.")
+                return content
+            event = json.loads(event_data)
+            if not isinstance(event, dict):
+                raise RuntimeError("Chat Completions stream event must be a JSON object.")
+            if event_name == "error" or event.get("type") == "error" or event.get("error"):
+                detail = event.get("error") or event.get("message") or event_name
+                raise RuntimeError(f"Chat Completions stream failed: {json.dumps(detail, ensure_ascii=False)[:800]}")
+            choices = event.get("choices")
+            if not isinstance(choices, list):
+                raise RuntimeError("Chat Completions stream event did not contain choices.")
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    raise RuntimeError("Chat Completions stream choice must be a JSON object.")
+                index = choice.get("index", 0)
+                delta = choice.get("delta") or {}
+                if not isinstance(delta, dict) or delta.get("refusal"):
+                    raise RuntimeError("Chat Completions stream did not contain a usable assistant delta.")
+                content = delta.get("content")
+                if content is not None:
+                    if not isinstance(content, str):
+                        raise RuntimeError("Chat Completions stream text must be a string.")
+                    text_deltas.setdefault(index, []).append(content)
+                finish_reason = choice.get("finish_reason")
+                if finish_reason is not None:
+                    if finish_reason != "stop":
+                        raise RuntimeError(f"Chat Completions did not finish normally: finish_reason={finish_reason}.")
+                    finished.add(index)
+        raise RuntimeError("Chat Completions stream ended before [DONE]; output may be incomplete.")
 
     def _read_responses_text(self, response: Any) -> str:
         """Read SSE incrementally, tolerating gateways that return ordinary JSON."""
@@ -257,6 +369,11 @@ class LLMProcessor:
         if self.base_url.endswith("/v1"):
             return f"{self.base_url}/responses"
         return f"{self.base_url}/v1/responses"
+
+    def _chat_completions_url(self) -> str:
+        if self.base_url.endswith("/v1"):
+            return f"{self.base_url}/chat/completions"
+        return f"{self.base_url}/v1/chat/completions"
 
     def _models_url(self) -> str:
         if self.base_url.endswith("/v1"):
