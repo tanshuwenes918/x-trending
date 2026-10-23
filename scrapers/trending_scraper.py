@@ -10,11 +10,15 @@ from datetime import datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 logger = logging.getLogger(__name__)
+
+
+class ScrapeError(RuntimeError):
+    """X could not supply usable trending data for this run."""
 
 
 class TrendingScraper:
@@ -26,7 +30,7 @@ class TrendingScraper:
 
     def scrape_all(self) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
         """Scrape trending data for all configured countries and categories."""
-        from config.settings import CATEGORIES, COUNTRIES, X_EXPLORE_URL
+        from config.settings import CATEGORIES, COUNTRIES
 
         logger.info("Starting to scrape trending data...")
         data: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
@@ -35,54 +39,67 @@ class TrendingScraper:
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
-            context_options = {
-                "viewport": {"width": 1400, "height": 1000},
-                "locale": "en-US",
-                "timezone_id": "Asia/Shanghai",
-            }
-            storage_state = self._storage_state()
-            if storage_state:
-                logger.info("Using X Playwright storage state")
-                context_options["storage_state"] = storage_state
+            try:
+                self._scrape_with_browser(browser, data)
+            finally:
+                browser.close()
 
-            context = browser.new_context(**context_options)
-            cookies = self._playwright_cookies()
-            if cookies and not storage_state:
-                logger.info("Injecting %d X cookies", len(cookies))
-                context.add_cookies(cookies)
-            elif cookies and storage_state:
-                logger.info("Skipping X_COOKIES because X storage state is configured")
-
-            page = context.new_page()
-            logger.info("Opening %s", X_EXPLORE_URL)
-            page.goto(X_EXPLORE_URL, wait_until="domcontentloaded", timeout=60000)
-            self._wait_for_global_trending_ready(page)
-            logger.info("Loaded X page: %s", page.url)
-
-            if "onboarding" in page.url or "login" in page.url:
-                logger.warning("X redirected to login/onboarding page. Check X_COOKIES.")
-
-            for country in COUNTRIES:
-                for category in CATEGORIES:
-                    try:
-                        data[country][category] = self.scrape_country_category(
-                            country,
-                            category,
-                            page=page,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed scraping country=%s category=%s: %s",
-                            country,
-                            category,
-                            exc,
-                            exc_info=True,
-                        )
-                        data[country][category] = []
-
-            browser.close()
-
+        tweet_count = sum(
+            len(trend.get("tweets", []))
+            for categories in data.values()
+            for trends in categories.values()
+            for trend in trends
+        )
+        if not tweet_count:
+            raise ScrapeError(
+                "X returned no tweets in any configured category. "
+                "Check the X session and category page; no daily report will be sent."
+            )
         return data
+
+    def _scrape_with_browser(self, browser, data) -> None:
+        from config.settings import CATEGORIES, COUNTRIES, X_EXPLORE_URL
+
+        context_options = {
+            "viewport": {"width": 1400, "height": 1000},
+            "locale": "en-US",
+            "timezone_id": "Asia/Shanghai",
+        }
+        storage_state = self._storage_state()
+        if storage_state:
+            logger.info("Using X Playwright storage state")
+            context_options["storage_state"] = storage_state
+
+        context = browser.new_context(**context_options)
+        cookies = self._playwright_cookies()
+        if cookies and not storage_state:
+            logger.info("Injecting %d X cookies", len(cookies))
+            context.add_cookies(cookies)
+        elif cookies and storage_state:
+            logger.info("Skipping X_COOKIES because X storage state is configured")
+
+        page = context.new_page()
+        logger.info("Opening %s", X_EXPLORE_URL)
+        page.goto(X_EXPLORE_URL, wait_until="domcontentloaded", timeout=60000)
+        self._wait_for_global_trending_ready(page)
+        logger.info("Loaded X page: %s", page.url)
+
+        for country in COUNTRIES:
+            for category in CATEGORIES:
+                try:
+                    data[country][category] = self.scrape_country_category(
+                        country, category, page=page,
+                    )
+                except ScrapeError:
+                    # Authentication/challenge failures invalidate the run, even
+                    # if an earlier category happened to return some tweets.
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Failed scraping country=%s category=%s: %s",
+                        country, category, exc, exc_info=True,
+                    )
+                    data[country][category] = []
 
     def scrape_country_category(
         self,
@@ -95,13 +112,17 @@ class TrendingScraper:
             raise RuntimeError("TrendingScraper requires a Playwright page for category scraping.")
 
         logger.info("Scraping %s - %s...", country, category)
+        self._assert_page_accessible(page)
         if not self._open_category(page, country, category):
+            self._assert_page_accessible(page)
             logger.warning("Category not found or not clickable: %s", category)
             logger.info("Visible non-tweet text sample: %s", self._visible_non_tweet_text_sample(page))
             return []
 
+        self._assert_page_accessible(page)
         self._wait_for_popular_today(page)
         tweets = self._collect_category_tweets(page)
+        self._assert_page_accessible(page)
 
         logger.info("Collected %d tweets for %s", len(tweets), category)
         return [
@@ -133,7 +154,9 @@ class TrendingScraper:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             self._wait_for_global_trending_ready(page)
-            return "login" not in page.url and "onboarding" not in page.url
+            return True
+        except ScrapeError:
+            raise
         except Exception as exc:
             logger.warning("Failed opening category URL for %s: %s", category, exc)
             return False
@@ -142,6 +165,7 @@ class TrendingScraper:
         aliases = self._category_aliases(category)
 
         for _ in range(3):
+            self._assert_page_accessible(page)
             self._return_to_category_nav(page)
             for alias in aliases:
                 locator = self._find_text_locator(page, alias)
@@ -151,7 +175,10 @@ class TrendingScraper:
                     locator.scroll_into_view_if_needed(timeout=5000)
                     locator.click(timeout=8000)
                     page.wait_for_timeout(3000)
+                    self._assert_page_accessible(page)
                     return True
+                except ScrapeError:
+                    raise
                 except PlaywrightTimeoutError:
                     logger.debug("Timed out clicking category alias: %s", alias)
                 except Exception as exc:
@@ -196,15 +223,30 @@ class TrendingScraper:
         aliases = [category]
         normalized = category.lower().replace(" ", "")
         replacements = {
-            "health&fitness": ["Health & Fitness", "Health and Fitness"],
-            "movies&tv": ["Movies & TV", "Movies and TV"],
-            "nature&outdoors": ["Nature & Outdoors", "Nature and Outdoors"],
-            "cryptocurrency": ["Cryptocurrency", "Crypto"],
-            "music": ["Music"],
-            "dance": ["Dance"],
-            "cars": ["Cars"],
-            "meme": ["Meme", "Memes"],
-            "anime": ["Anime"],
+            "technology": ["技术", "技術", "科技"],
+            "news": ["新闻", "新聞"],
+            "business&finance": ["商业和金融", "商業和金融", "商业与金融", "商業與金融"],
+            "science": ["科学", "科學"],
+            "travel": ["旅游", "旅遊"],
+            "gaming": ["游戏竞技", "遊戲競技", "游戏", "遊戲"],
+            "sports": ["体育", "體育"],
+            "health&fitness": ["Health & Fitness", "Health and Fitness", "健康与健身", "健康與健身"],
+            "cryptocurrency": ["Cryptocurrency", "Crypto", "加密货币", "加密貨幣"],
+            "cars": ["Cars", "汽车", "汽車"],
+            "music": ["Music", "音乐", "音樂"],
+            "dance": ["Dance", "舞曲", "舞蹈"],
+            "celebrity": ["明星", "名人"],
+            "relationship": ["关系", "關係", "人际关系", "人際關係"],
+            "movies&tv": ["Movies & TV", "Movies and TV", "电影与电视", "電影與電視"],
+            "nature&outdoors": ["Nature & Outdoors", "Nature and Outdoors", "自然与户外", "自然與戶外"],
+            "food": ["美食"],
+            "meme": ["Meme", "Memes", "表情包", "迷因", "梗图", "梗圖"],
+            "beauty": ["美容"],
+            "pets": ["宠物", "寵物"],
+            "fashion": ["时尚", "時尚"],
+            "anime": ["Anime", "动漫", "動漫", "日本动画", "日本動畫"],
+            "religion": ["宗教"],
+            "home&garden": ["家居与园艺", "家居與園藝", "居家和园艺", "居家和園藝"],
         }
         aliases.extend(replacements.get(normalized, []))
         return list(dict.fromkeys(aliases))
@@ -229,12 +271,53 @@ class TrendingScraper:
             """
         )
 
+    def _assert_page_accessible(self, page: Page) -> None:
+        """Reject login and verification pages before collecting or exporting."""
+        path = urlparse(page.url).path.lower()
+        if path.startswith("/account/access"):
+            raise ScrapeError(
+                "X redirected to /account/access (account verification/access check). "
+                "Open X in your browser with the same account and complete any checks. "
+                "Then export a verified session and update X_STORAGE_STATE_B64."
+            )
+        if any(part in path for part in ("/login", "/onboarding", "/signup")):
+            raise ScrapeError(
+                "X requires login. Sign in with the scraper account, verify the trending "
+                "page loads, then refresh X_STORAGE_STATE_B64 or X_COOKIES."
+            )
+
+        title = page.title().lower()
+        challenge = page.locator(
+            '#challenge-form, #cf-challenge-running, .cf-browser-verification, '
+            'iframe[src*="challenges.cloudflare.com"]'
+        ).count() > 0
+        if not challenge and page.locator('article[data-testid="tweet"]').count() == 0:
+            text = page.locator("body").inner_text(timeout=3000).strip().lower()
+            challenge = (
+                "just a moment" in title
+                or "attention required" in title
+                or "verify you are human" in text
+                or "checking your browser" in text
+                or ("cloudflare" in text and len(text) < 200)
+            )
+        if challenge:
+            raise ScrapeError(
+                "X is showing a Cloudflare/browser verification page instead of trends. "
+                "Complete verification in your own browser and refresh X_STORAGE_STATE_B64. "
+                "If it only fails on GitHub Actions, check the runner's access to X."
+            )
+
     def _wait_for_global_trending_ready(self, page: Page) -> None:
         for attempt in range(2):
+            self._assert_page_accessible(page)
             try:
-                page.get_by_text("Popular today").first.wait_for(timeout=30000)
+                page.get_by_text(
+                    re.compile(r"Popular today|今日热门|今日熱門", re.IGNORECASE)
+                ).first.wait_for(timeout=30000)
+                self._assert_page_accessible(page)
                 return
             except PlaywrightTimeoutError:
+                self._assert_page_accessible(page)
                 if page.locator('article[data-testid="tweet"]').count() > 0:
                     return
                 if attempt == 0:
@@ -242,13 +325,21 @@ class TrendingScraper:
                     page.reload(wait_until="domcontentloaded", timeout=60000)
                     continue
 
-        logger.warning("X trending page did not show ready markers before scraping")
+        raise ScrapeError(
+            "X trending page did not show ready markers after a reload. "
+            "Check that the configured URL and X session show real categories and tweets; "
+            "no daily report will be sent."
+        )
 
     def _wait_for_popular_today(self, page: Page) -> None:
+        self._assert_page_accessible(page)
         try:
-            page.get_by_text("Popular today").first.wait_for(timeout=10000)
+            page.get_by_text(
+                re.compile(r"Popular today|今日热门|今日熱門", re.IGNORECASE)
+            ).first.wait_for(timeout=10000)
         except PlaywrightTimeoutError:
             logger.debug("Popular today text was not visible after category click.")
+        self._assert_page_accessible(page)
 
     def _collect_category_tweets(self, page: Page) -> List[Dict[str, Any]]:
         from config.settings import MAX_CANDIDATES_PER_CATEGORY, SCROLLS_PER_CATEGORY
@@ -256,6 +347,7 @@ class TrendingScraper:
         tweets_by_url: Dict[str, Dict[str, Any]] = {}
 
         for scroll_index in range(SCROLLS_PER_CATEGORY + 1):
+            self._assert_page_accessible(page)
             for article in page.locator('article[data-testid="tweet"]').all():
                 tweet = self._extract_tweet(article)
                 tweet_url = tweet.get("tweet_url", "")
@@ -346,7 +438,11 @@ class TrendingScraper:
                         return value
 
         for locator in article.locator("[aria-label]").all():
-            value = self._extract_metric_value(self._safe_attr(locator, "aria-label"), metric)
+            # An unlabelled count elsewhere in the tweet cannot identify which
+            # metric it belongs to. Only accept bare counts on a known control.
+            value = self._extract_metric_value(
+                self._safe_attr(locator, "aria-label"), metric, allow_bare_number=False,
+            )
             if value:
                 return value
 
@@ -379,62 +475,59 @@ class TrendingScraper:
             pass
         return [text for text in candidates if text]
 
-    def _extract_metric_value(self, text: str, metric: str) -> int:
+    def _extract_metric_value(self, text: str, metric: str, *, allow_bare_number: bool = True) -> int:
         normalized = self._clean_metric_text(text)
         if not normalized:
             return 0
 
         keyword_groups = {
-            "like": r"likes?|liked|赞|喜歡|喜欢",
-            "repost": r"reposts?|retweets?|reposted|retweeted|转发|轉發",
-            "reply": r"replies|reply|评论|回覆|回复",
-            "view": r"views?|view|浏览|觀看|观看",
+            "like": r"likes?|liked|赞|讚|喜歡|喜欢",
+            "repost": r"reposts?|retweets?|reposted|retweeted|转发|轉發|转帖|轉帖|转贴|轉貼",
+            "reply": r"replies|reply|评论|評論|回覆|回复|回復",
+            "view": r"views?|view|浏览|瀏覽|觀看|观看|查看",
         }
-        number = r"(\d+(?:[,.]\d+)?\s*[KkMmBb]?)"
+        number = r"(\d+(?:[,.]\d+)*(?:\s*[KkMmBb万萬亿億])?)"
         keyword = f"(?:{keyword_groups[metric]})"
 
         for pattern in (
-            rf"{number}\s+{keyword}\b",
-            rf"\b{keyword}\s+{number}",
+            rf"{number}\s*(?:次|条|條|則|个|個)?\s*{keyword}(?![A-Za-z])",
+            rf"(?<![A-Za-z]){keyword}\s*[:：]?\s*{number}",
         ):
             match = re.search(pattern, normalized, re.IGNORECASE)
             if match:
                 return self._compact_number_to_int(match.group(1))
 
-        if re.fullmatch(number, normalized):
+        if allow_bare_number and re.fullmatch(number, normalized):
             return self._compact_number_to_int(normalized)
 
         return 0
 
     def _extract_action_group_metrics(self, article) -> Dict[str, int]:
         """Infer metrics from X's compact action row when labels omit counts."""
-        values = self._action_group_numbers(article)
-        if not values:
-            return {}
+        # X's accessible group can contain five counts, including bookmarks.
+        # Match the metric names instead of assuming those counts' positions.
+        for group in article.locator('[role="group"]').all():
+            label = self._safe_attr(group, "aria-label")
+            metrics = {
+                metric: self._extract_metric_value(label, metric, allow_bare_number=False)
+                for metric in ("reply", "repost", "like", "view")
+            }
+            if any(metrics.values()):
+                return metrics
 
-        if len(values) >= 4:
+        values = self._action_group_numbers(article)
+        if len(values) == 4:
             return {
                 "reply": values[0],
                 "repost": values[1],
                 "like": values[2],
                 "view": values[3],
             }
-        if len(values) == 3:
-            return {
-                "repost": values[0],
-                "like": values[1],
-                "view": values[2],
-            }
-        if len(values) == 2:
-            return {
-                "repost": values[0],
-                "view": values[1],
-            }
         return {}
 
     def _action_group_numbers(self, article) -> List[int]:
         candidates: List[int] = []
-        number_pattern = re.compile(r"^\d+(?:[,.]\d+)?\s*[KkMmBb]?$")
+        number_pattern = r"\d+(?:[,.]\d+)*(?:\s*[KkMmBb万萬亿億])?"
 
         try:
             groups = article.locator('[role="group"]').all()
@@ -443,12 +536,14 @@ class TrendingScraper:
 
         for group in groups:
             text = self._safe_inner_text(group)
+            # Only a complete four-count row has a known positional mapping.
+            # Dropping a compact/unknown/zero count would shift the other fields.
+            if not re.fullmatch(rf"{number_pattern}(?:\s+{number_pattern}){{3}}", text):
+                continue
             numbers = [
                 self._compact_number_to_int(part)
-                for part in re.split(r"\s+", text)
-                if number_pattern.fullmatch(part)
+                for part in re.findall(number_pattern, text)
             ]
-            numbers = [number for number in numbers if number > 0]
             if len(numbers) > len(candidates):
                 candidates = numbers
 
@@ -533,19 +628,17 @@ class TrendingScraper:
 
     def _compact_number_to_int(self, value: str) -> int:
         text = self._clean_metric_text(value).replace(" ", "")
-        if "," in text and "." not in text and re.fullmatch(r"\d+,\d{1,2}[KkMmBb]?", text):
+        if "," in text and "." not in text and re.fullmatch(r"\d+,\d{1,2}[KkMmBb万萬亿億]?", text):
             text = text.replace(",", ".")
         else:
             text = text.replace(",", "")
         multiplier = 1
-        if text.lower().endswith("k"):
-            multiplier = 1_000
-            text = text[:-1]
-        elif text.lower().endswith("m"):
-            multiplier = 1_000_000
-            text = text[:-1]
-        elif text.lower().endswith("b"):
-            multiplier = 1_000_000_000
+        suffixes = {
+            "k": 1_000, "m": 1_000_000, "b": 1_000_000_000,
+            "万": 10_000, "萬": 10_000, "亿": 100_000_000, "億": 100_000_000,
+        }
+        if text and text[-1].lower() in suffixes:
+            multiplier = suffixes[text[-1].lower()]
             text = text[:-1]
         try:
             return int(float(text) * multiplier)

@@ -28,6 +28,14 @@ on:
         required: false
         type: boolean
         default: false
+      retry_from_run:
+        description: "Optional failed run ID to reuse; leave blank to scrape fresh X data"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
 
 concurrency:
   group: daily-x-trending
@@ -89,8 +97,33 @@ jobs:
       - name: Run tests
         run: pytest -q tests
 
+      - name: Download saved retry input
+        if: ${{ inputs.retry_from_run != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: x-trending-output
+          path: retry-input
+          run-id: ${{ inputs.retry_from_run }}
+          github-token: ${{ github.token }}
+
       - name: Scrape and export
+        if: ${{ inputs.retry_from_run == '' }}
         run: python main.py
+
+      - name: Retry saved input and export
+        if: ${{ inputs.retry_from_run != '' }}
+        run: |
+          python - <<'PY'
+          import runpy
+          import sys
+          from pathlib import Path
+
+          checkpoints = list(Path("retry-input").glob("retry_input_*.json"))
+          if len(checkpoints) != 1:
+              raise SystemExit("Expected exactly one retry_input JSON in the selected run artifact")
+          sys.argv = ["main.py", "--input-json", str(checkpoints[0])]
+          runpy.run_path("main.py", run_name="__main__")
+          PY
 
       - name: Upload JSON output
         if: always()

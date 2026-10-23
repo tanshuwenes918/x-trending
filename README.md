@@ -71,12 +71,24 @@ News, religion
 
 ## Local Setup
 
+macOS / Linux:
+
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 python -m playwright install chromium
-copy .env.example .env
+cp .env.example .env
+```
+
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m playwright install chromium
+Copy-Item .env.example .env
 ```
 
 Fill `.env` locally:
@@ -116,25 +128,55 @@ Send the latest local JSON to Feishu without scraping X again:
 python main.py --input-json latest --output-format feishu
 ```
 
+If LLM enrichment fails, the run exits unsuccessfully and saves the nonempty input as `outputs/retry_input_*.json`. Retry that file without scraping X again:
+
+```bash
+python main.py --input-json outputs/retry_input_<timestamp>.json --output-format preview --dry-run
+```
+
+Retry inputs are separate from completed daily reports and are never sent to Feishu by the failed run.
+
+Only failures after valid input has been collected can produce a retry input. A login or scraping failure without usable data cannot be replayed. GitHub Actions artifacts are kept for the repository's configured artifact retention period; download the JSON for longer storage.
+
 Check category clicking:
 
 ```bash
-python scripts\check_x_categories.py --headed --use-chrome
+python scripts/check_x_categories.py --headed --use-chrome
 ```
 
-If GitHub Actions is redirected to X login even after setting `X_COOKIES`, export a full Playwright login state locally:
+### Restore an X session
+
+An empty report does not prove that X has no matching tweets. A redirect to `/account/access`, a login page, or Cloudflare content means the trending feed may not have been accessible. The exact reason for `/account/access` must be checked in the browser; the URL alone does not establish whether the account needs verification or the runner was challenged.
+
+First open `https://x.com/i/jf/global-trending/home` on your own computer. Complete any login or account verification manually and confirm that the trending feed and category buttons load. Then, in the project directory with the virtual environment activated, export a full Playwright login state:
 
 ```bash
-python scripts\export_x_storage_state.py --persistent
+python scripts/export_x_storage_state.py --persistent
 ```
 
-After the browser opens, log in to X and press Enter in the terminal. Then copy the full content of `outputs/x_storage_state.b64.txt` into the GitHub Secret `X_STORAGE_STATE_B64`.
+This command works on macOS and Linux as well as Windows, and uses installed Google Chrome with a dedicated profile in `outputs/x_playwright_profile`. The profile allows you to complete login manually and reuse it for later exports. If Chrome is unavailable, omit `--persistent` to use the Playwright Chromium installed during setup.
+
+When the browser opens, finish login/verification and press Enter in the terminal. The script reopens the configured trending URL and checks that it is ready. Login pages, account-access challenges, Cloudflare blocks, and timeouts fail the export; neither login state file is replaced. Only a successful check produces `outputs/x_storage_state.json` and `outputs/x_storage_state.b64.txt`.
+
+Update the repository's **Settings → Secrets and variables → Actions → Secrets → X_STORAGE_STATE_B64** with the complete `.b64.txt` content. If GitHub CLI is installed and authenticated, macOS / Linux users can update it directly without printing the secret:
+
+```bash
+gh secret set X_STORAGE_STATE_B64 --repo tanshuwenes918/x-trending < outputs/x_storage_state.b64.txt
+```
+
+`X_STORAGE_STATE_B64` takes precedence over `X_COOKIES`; refresh or remove an old storage-state secret when changing the session. The JSON, base64 file, and persistent browser profile contain login credentials. Keep them local; `outputs/` is ignored by Git.
+
+Run the workflow manually after updating the secret and check the scraping logs. A successful local export does not guarantee that X will accept the session from GitHub-hosted runners. If the same session works locally but Actions still reaches a verification/block page, use a trusted self-hosted runner with a supported network environment, or a supported X data source. Refreshing cookies alone may not resolve a runner/network challenge.
 
 ## GitHub Actions
 
 The workflow is in `.github/workflows/daily-trending.yml`.
 
 It runs every day at `01:00 UTC`, which is `09:00 Asia/Shanghai`, and can also be started manually.
+
+Scheduled runs always scrape fresh X data. Normal manual runs also scrape fresh data when `retry_from_run` is left blank; a failed run never automatically replaces a later day's input.
+
+To recover an LLM failure, open **Run workflow**, explicitly set `retry_from_run` to the failed run's numeric ID, and choose JSON output with `dry_run=true` for verification. The workflow downloads that run's `x-trending-output` artifact and reuses its `retry_input_*.json`, skipping X scraping. This mode generates a report for the original collection time. **Re-run jobs** preserves a run's original inputs; use a new normal run with `retry_from_run` blank to collect fresh data.
 
 Required repository secrets:
 
@@ -154,4 +196,4 @@ Do not put API keys, X cookies, or Feishu webhook URLs in source files, README, 
 
 GitHub Actions runs on a fresh Linux runner each time. The workflow installs Python dependencies and Playwright Chromium with system dependencies.
 
-X cookies can expire or be invalidated after logout/password changes. If Actions starts redirecting to login, update `X_STORAGE_STATE_B64` or `X_COOKIES`.
+X sessions can expire or be invalidated after logout/password changes. If Actions starts redirecting to login, verify access locally and refresh `X_STORAGE_STATE_B64` using the steps above.

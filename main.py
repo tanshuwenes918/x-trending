@@ -4,7 +4,10 @@
 import logging
 import argparse
 import json
+import shlex
 import sys
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -57,6 +60,21 @@ def write_json_output(data: dict) -> Path:
     return output_path
 
 
+def write_retry_checkpoint(data: dict) -> Path:
+    """Preserve a nonempty LLM input separately from completed daily reports."""
+    from config.settings import OUTPUT_DIR
+
+    validate_report_data(data)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    checkpoint_time = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    output_path = OUTPUT_DIR / f"retry_input_{checkpoint_time}.json"
+    output_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return output_path.resolve()
+
+
 def resolve_input_json(value: str) -> Path:
     """Resolve an input JSON path, with 'latest' as a convenience alias."""
     from config.settings import OUTPUT_DIR
@@ -79,6 +97,17 @@ def read_json_input(input_path: Path) -> dict:
     if not input_path.exists():
         raise FileNotFoundError(f"Input JSON not found: {input_path}")
     return json.loads(input_path.read_text(encoding="utf-8"))
+
+
+def validate_report_data(data: dict) -> None:
+    """Do not enrich or publish a report with no usable source items."""
+    if not any(group.get("items") for group in data.get("groups", [])):
+        raw_count = data.get("summary", {}).get("raw_tweet_count", 0)
+        raise RuntimeError(
+            f"No eligible tweets for the daily report (raw_tweet_count={raw_count}). "
+            "Check X access, category extraction, and tweet timestamps/lookback settings. "
+            "No daily report will be written or sent."
+        )
 
 
 def main():
@@ -117,7 +146,24 @@ def main():
             raw_data = scraper.scrape_all()
             trending_data = processor.process(raw_data)
 
-        trending_data = llm_processor.enrich(trending_data)
+        validate_report_data(trending_data)
+        retry_input = deepcopy(trending_data)
+        try:
+            trending_data = llm_processor.enrich(trending_data)
+        except Exception:
+            try:
+                retry_path = write_retry_checkpoint(retry_input)
+            except Exception:
+                logger.error("Failed to save LLM retry input", exc_info=True)
+            else:
+                logger.error(
+                    "LLM failed; saved nonempty retry input to %s. "
+                    "Replay with: python main.py --input-json %s",
+                    retry_path,
+                    shlex.quote(str(retry_path)),
+                )
+            raise
+        validate_report_data(trending_data)
         output_path = write_json_output(trending_data)
         logger.info("Wrote JSON output to %s", output_path)
 
