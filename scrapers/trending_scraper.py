@@ -438,7 +438,11 @@ class TrendingScraper:
                         return value
 
         for locator in article.locator("[aria-label]").all():
-            value = self._extract_metric_value(self._safe_attr(locator, "aria-label"), metric)
+            # An unlabelled count elsewhere in the tweet cannot identify which
+            # metric it belongs to. Only accept bare counts on a known control.
+            value = self._extract_metric_value(
+                self._safe_attr(locator, "aria-label"), metric, allow_bare_number=False,
+            )
             if value:
                 return value
 
@@ -471,62 +475,59 @@ class TrendingScraper:
             pass
         return [text for text in candidates if text]
 
-    def _extract_metric_value(self, text: str, metric: str) -> int:
+    def _extract_metric_value(self, text: str, metric: str, *, allow_bare_number: bool = True) -> int:
         normalized = self._clean_metric_text(text)
         if not normalized:
             return 0
 
         keyword_groups = {
-            "like": r"likes?|liked|赞|喜歡|喜欢",
-            "repost": r"reposts?|retweets?|reposted|retweeted|转发|轉發",
-            "reply": r"replies|reply|评论|回覆|回复",
-            "view": r"views?|view|浏览|觀看|观看",
+            "like": r"likes?|liked|赞|讚|喜歡|喜欢",
+            "repost": r"reposts?|retweets?|reposted|retweeted|转发|轉發|转帖|轉帖|转贴|轉貼",
+            "reply": r"replies|reply|评论|評論|回覆|回复|回復",
+            "view": r"views?|view|浏览|瀏覽|觀看|观看|查看",
         }
-        number = r"(\d+(?:[,.]\d+)?\s*[KkMmBb]?)"
+        number = r"(\d+(?:[,.]\d+)*(?:\s*[KkMmBb万萬亿億])?)"
         keyword = f"(?:{keyword_groups[metric]})"
 
         for pattern in (
-            rf"{number}\s+{keyword}\b",
-            rf"\b{keyword}\s+{number}",
+            rf"{number}\s*(?:次|条|條|則|个|個)?\s*{keyword}(?![A-Za-z])",
+            rf"(?<![A-Za-z]){keyword}\s*[:：]?\s*{number}",
         ):
             match = re.search(pattern, normalized, re.IGNORECASE)
             if match:
                 return self._compact_number_to_int(match.group(1))
 
-        if re.fullmatch(number, normalized):
+        if allow_bare_number and re.fullmatch(number, normalized):
             return self._compact_number_to_int(normalized)
 
         return 0
 
     def _extract_action_group_metrics(self, article) -> Dict[str, int]:
         """Infer metrics from X's compact action row when labels omit counts."""
-        values = self._action_group_numbers(article)
-        if not values:
-            return {}
+        # X's accessible group can contain five counts, including bookmarks.
+        # Match the metric names instead of assuming those counts' positions.
+        for group in article.locator('[role="group"]').all():
+            label = self._safe_attr(group, "aria-label")
+            metrics = {
+                metric: self._extract_metric_value(label, metric, allow_bare_number=False)
+                for metric in ("reply", "repost", "like", "view")
+            }
+            if any(metrics.values()):
+                return metrics
 
-        if len(values) >= 4:
+        values = self._action_group_numbers(article)
+        if len(values) == 4:
             return {
                 "reply": values[0],
                 "repost": values[1],
                 "like": values[2],
                 "view": values[3],
             }
-        if len(values) == 3:
-            return {
-                "repost": values[0],
-                "like": values[1],
-                "view": values[2],
-            }
-        if len(values) == 2:
-            return {
-                "repost": values[0],
-                "view": values[1],
-            }
         return {}
 
     def _action_group_numbers(self, article) -> List[int]:
         candidates: List[int] = []
-        number_pattern = re.compile(r"^\d+(?:[,.]\d+)?\s*[KkMmBb]?$")
+        number_pattern = r"\d+(?:[,.]\d+)*(?:\s*[KkMmBb万萬亿億])?"
 
         try:
             groups = article.locator('[role="group"]').all()
@@ -535,12 +536,14 @@ class TrendingScraper:
 
         for group in groups:
             text = self._safe_inner_text(group)
+            # Only a complete four-count row has a known positional mapping.
+            # Dropping a compact/unknown/zero count would shift the other fields.
+            if not re.fullmatch(rf"{number_pattern}(?:\s+{number_pattern}){{3}}", text):
+                continue
             numbers = [
                 self._compact_number_to_int(part)
-                for part in re.split(r"\s+", text)
-                if number_pattern.fullmatch(part)
+                for part in re.findall(number_pattern, text)
             ]
-            numbers = [number for number in numbers if number > 0]
             if len(numbers) > len(candidates):
                 candidates = numbers
 
@@ -625,19 +628,17 @@ class TrendingScraper:
 
     def _compact_number_to_int(self, value: str) -> int:
         text = self._clean_metric_text(value).replace(" ", "")
-        if "," in text and "." not in text and re.fullmatch(r"\d+,\d{1,2}[KkMmBb]?", text):
+        if "," in text and "." not in text and re.fullmatch(r"\d+,\d{1,2}[KkMmBb万萬亿億]?", text):
             text = text.replace(",", ".")
         else:
             text = text.replace(",", "")
         multiplier = 1
-        if text.lower().endswith("k"):
-            multiplier = 1_000
-            text = text[:-1]
-        elif text.lower().endswith("m"):
-            multiplier = 1_000_000
-            text = text[:-1]
-        elif text.lower().endswith("b"):
-            multiplier = 1_000_000_000
+        suffixes = {
+            "k": 1_000, "m": 1_000_000, "b": 1_000_000_000,
+            "万": 10_000, "萬": 10_000, "亿": 100_000_000, "億": 100_000_000,
+        }
+        if text and text[-1].lower() in suffixes:
+            multiplier = suffixes[text[-1].lower()]
             text = text[:-1]
         try:
             return int(float(text) * multiplier)
