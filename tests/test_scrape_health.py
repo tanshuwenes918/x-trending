@@ -74,6 +74,58 @@ def bind_browser(monkeypatch, scraper, page):
 
 
 @pytest.mark.parametrize(
+    "category,simplified,traditional",
+    [
+        ("Technology", "技术", "科技"),
+        ("News", "新闻", "新聞"),
+        ("Business & Finance", "商业和金融", "商業與金融"),
+        ("Science", "科学", "科學"),
+        ("Travel", "旅游", "旅遊"),
+        ("Gaming", "游戏竞技", "遊戲"),
+        ("Sports", "体育", "體育"),
+        ("Health & Fitness", "健康与健身", "健康與健身"),
+        ("cryptocurrency", "加密货币", "加密貨幣"),
+        ("cars", "汽车", "汽車"),
+        ("music", "音乐", "音樂"),
+        ("dance", "舞曲", "舞蹈"),
+        ("celebrity", "明星", "名人"),
+        ("relationship", "关系", "人際關係"),
+        ("Movies & TV", "电影与电视", "電影與電視"),
+        ("Nature & Outdoors", "自然与户外", "自然與戶外"),
+        ("food", "美食", "美食"),
+        ("meme", "表情包", "迷因"),
+        ("beauty", "美容", "美容"),
+        ("Pets", "宠物", "寵物"),
+        ("fashion", "时尚", "時尚"),
+        ("anime", "动漫", "日本動畫"),
+        ("religion", "宗教", "宗教"),
+        ("Home & Garden", "家居与园艺", "居家和園藝"),
+    ],
+)
+@pytest.mark.parametrize("locale", ["simplified", "traditional"])
+def test_english_source_category_clicks_localized_chinese_button(category, simplified, traditional, locale):
+    """A localized X account can use the existing English source categories."""
+    button_label = simplified if locale == "simplified" else traditional
+    page = make_page(ready=True)
+    button = MagicMock()
+    button.count.return_value = 1
+    button.nth.return_value = button
+    button.evaluate.return_value = True
+    missing_button = MagicMock()
+    missing_button.count.return_value = 0
+
+    def find_visible_label(text, **kwargs):
+        matches = text == button_label if isinstance(text, str) else text.search(button_label)
+        return button if matches else missing_button
+
+    page.get_by_text.side_effect = find_visible_label
+
+    assert TrendingScraper()._click_category(page, category) is True
+
+    button.click.assert_called_once()
+
+
+@pytest.mark.parametrize(
     "url,body,title",
     [
         ("https://x.com/account/access", "", "X"),
@@ -117,6 +169,29 @@ def test_valid_trending_page_passes_without_reloading(ready, tweets):
 
     TrendingScraper()._wait_for_global_trending_ready(page)
 
+    page.reload.assert_not_called()
+
+
+@pytest.mark.parametrize("marker", ["Popular today", "今日热门", "今日熱門"])
+@pytest.mark.parametrize("wait_method", ["_wait_for_global_trending_ready", "_wait_for_popular_today"])
+def test_localized_ready_marker_is_used_without_waiting_for_missing_english(marker, wait_method):
+    page = make_page(body=marker)
+    visible_marker = MagicMock()
+    visible_marker.first = visible_marker
+    missing_marker = MagicMock()
+    missing_marker.first = missing_marker
+    missing_marker.wait_for.side_effect = PlaywrightTimeoutError("This marker is not on the localized page")
+
+    def find_marker(text, **kwargs):
+        matches = text in marker if isinstance(text, str) else text.search(marker)
+        return visible_marker if matches else missing_marker
+
+    page.get_by_text.side_effect = find_marker
+
+    getattr(TrendingScraper(), wait_method)(page)
+
+    visible_marker.wait_for.assert_called_once()
+    missing_marker.wait_for.assert_not_called()
     page.reload.assert_not_called()
 
 

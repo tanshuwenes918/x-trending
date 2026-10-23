@@ -223,15 +223,30 @@ class TrendingScraper:
         aliases = [category]
         normalized = category.lower().replace(" ", "")
         replacements = {
-            "health&fitness": ["Health & Fitness", "Health and Fitness"],
-            "movies&tv": ["Movies & TV", "Movies and TV"],
-            "nature&outdoors": ["Nature & Outdoors", "Nature and Outdoors"],
-            "cryptocurrency": ["Cryptocurrency", "Crypto"],
-            "music": ["Music"],
-            "dance": ["Dance"],
-            "cars": ["Cars"],
-            "meme": ["Meme", "Memes"],
-            "anime": ["Anime"],
+            "technology": ["技术", "技術", "科技"],
+            "news": ["新闻", "新聞"],
+            "business&finance": ["商业和金融", "商業和金融", "商业与金融", "商業與金融"],
+            "science": ["科学", "科學"],
+            "travel": ["旅游", "旅遊"],
+            "gaming": ["游戏竞技", "遊戲競技", "游戏", "遊戲"],
+            "sports": ["体育", "體育"],
+            "health&fitness": ["Health & Fitness", "Health and Fitness", "健康与健身", "健康與健身"],
+            "cryptocurrency": ["Cryptocurrency", "Crypto", "加密货币", "加密貨幣"],
+            "cars": ["Cars", "汽车", "汽車"],
+            "music": ["Music", "音乐", "音樂"],
+            "dance": ["Dance", "舞曲", "舞蹈"],
+            "celebrity": ["明星", "名人"],
+            "relationship": ["关系", "關係", "人际关系", "人際關係"],
+            "movies&tv": ["Movies & TV", "Movies and TV", "电影与电视", "電影與電視"],
+            "nature&outdoors": ["Nature & Outdoors", "Nature and Outdoors", "自然与户外", "自然與戶外"],
+            "food": ["美食"],
+            "meme": ["Meme", "Memes", "表情包", "迷因", "梗图", "梗圖"],
+            "beauty": ["美容"],
+            "pets": ["宠物", "寵物"],
+            "fashion": ["时尚", "時尚"],
+            "anime": ["Anime", "动漫", "動漫", "日本动画", "日本動畫"],
+            "religion": ["宗教"],
+            "home&garden": ["家居与园艺", "家居與園藝", "居家和园艺", "居家和園藝"],
         }
         aliases.extend(replacements.get(normalized, []))
         return list(dict.fromkeys(aliases))
@@ -296,7 +311,9 @@ class TrendingScraper:
         for attempt in range(2):
             self._assert_page_accessible(page)
             try:
-                page.get_by_text("Popular today").first.wait_for(timeout=30000)
+                page.get_by_text(
+                    re.compile(r"Popular today|今日热门|今日熱門", re.IGNORECASE)
+                ).first.wait_for(timeout=30000)
                 self._assert_page_accessible(page)
                 return
             except PlaywrightTimeoutError:
@@ -317,7 +334,9 @@ class TrendingScraper:
     def _wait_for_popular_today(self, page: Page) -> None:
         self._assert_page_accessible(page)
         try:
-            page.get_by_text("Popular today").first.wait_for(timeout=10000)
+            page.get_by_text(
+                re.compile(r"Popular today|今日热门|今日熱門", re.IGNORECASE)
+            ).first.wait_for(timeout=10000)
         except PlaywrightTimeoutError:
             logger.debug("Popular today text was not visible after category click.")
         self._assert_page_accessible(page)
