@@ -4,7 +4,10 @@
 import logging
 import argparse
 import json
+import shlex
 import sys
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -55,6 +58,21 @@ def write_json_output(data: dict) -> Path:
         encoding="utf-8",
     )
     return output_path
+
+
+def write_retry_checkpoint(data: dict) -> Path:
+    """Preserve a nonempty LLM input separately from completed daily reports."""
+    from config.settings import OUTPUT_DIR
+
+    validate_report_data(data)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    checkpoint_time = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    output_path = OUTPUT_DIR / f"retry_input_{checkpoint_time}.json"
+    output_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return output_path.resolve()
 
 
 def resolve_input_json(value: str) -> Path:
@@ -129,7 +147,22 @@ def main():
             trending_data = processor.process(raw_data)
 
         validate_report_data(trending_data)
-        trending_data = llm_processor.enrich(trending_data)
+        retry_input = deepcopy(trending_data)
+        try:
+            trending_data = llm_processor.enrich(trending_data)
+        except Exception:
+            try:
+                retry_path = write_retry_checkpoint(retry_input)
+            except Exception:
+                logger.error("Failed to save LLM retry input", exc_info=True)
+            else:
+                logger.error(
+                    "LLM failed; saved nonempty retry input to %s. "
+                    "Replay with: python main.py --input-json %s",
+                    retry_path,
+                    shlex.quote(str(retry_path)),
+                )
+            raise
         validate_report_data(trending_data)
         output_path = write_json_output(trending_data)
         logger.info("Wrote JSON output to %s", output_path)

@@ -128,6 +128,16 @@ Send the latest local JSON to Feishu without scraping X again:
 python main.py --input-json latest --output-format feishu
 ```
 
+If LLM enrichment fails, the run exits unsuccessfully and saves the nonempty input as `outputs/retry_input_*.json`. Retry that file without scraping X again:
+
+```bash
+python main.py --input-json outputs/retry_input_<timestamp>.json --output-format preview --dry-run
+```
+
+Retry inputs are separate from completed daily reports and are never sent to Feishu by the failed run.
+
+Only failures after valid input has been collected can produce a retry input. A login or scraping failure without usable data cannot be replayed. GitHub Actions artifacts are kept for the repository's configured artifact retention period; download the JSON for longer storage.
+
 Check category clicking:
 
 ```bash
@@ -163,6 +173,10 @@ Run the workflow manually after updating the secret and check the scraping logs.
 The workflow is in `.github/workflows/daily-trending.yml`.
 
 It runs every day at `01:00 UTC`, which is `09:00 Asia/Shanghai`, and can also be started manually.
+
+Scheduled runs always scrape fresh X data. Normal manual runs also scrape fresh data when `retry_from_run` is left blank; a failed run never automatically replaces a later day's input.
+
+To recover an LLM failure, open **Run workflow**, explicitly set `retry_from_run` to the failed run's numeric ID, and choose JSON output with `dry_run=true` for verification. The workflow downloads that run's `x-trending-output` artifact and reuses its `retry_input_*.json`, skipping X scraping. This mode generates a report for the original collection time. **Re-run jobs** preserves a run's original inputs; use a new normal run with `retry_from_run` blank to collect fresh data.
 
 Required repository secrets:
 
