@@ -81,6 +81,17 @@ def read_json_input(input_path: Path) -> dict:
     return json.loads(input_path.read_text(encoding="utf-8"))
 
 
+def validate_report_data(data: dict) -> None:
+    """Do not enrich or publish a report with no usable source items."""
+    if not any(group.get("items") for group in data.get("groups", [])):
+        raw_count = data.get("summary", {}).get("raw_tweet_count", 0)
+        raise RuntimeError(
+            f"No eligible tweets for the daily report (raw_tweet_count={raw_count}). "
+            "Check X access, category extraction, and tweet timestamps/lookback settings. "
+            "No daily report will be written or sent."
+        )
+
+
 def main():
     """Main entry point."""
     # Load environment variables
@@ -117,7 +128,9 @@ def main():
             raw_data = scraper.scrape_all()
             trending_data = processor.process(raw_data)
 
+        validate_report_data(trending_data)
         trending_data = llm_processor.enrich(trending_data)
+        validate_report_data(trending_data)
         output_path = write_json_output(trending_data)
         logger.info("Wrote JSON output to %s", output_path)
 
