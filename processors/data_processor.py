@@ -396,7 +396,7 @@ class DataProcessor:
             kind = "视频" if "video" in tweet.get("media_types", []) else "图片" if any(
                 value in {"image", "photo"} for value in tweet.get("media_types", [])
             ) else "媒体"
-            return f"{subject}（{kind}动态）：该帖无正文，具体内容请查看原帖。"
+            return f"{subject}：发布{kind}动态，原帖无正文，具体内容请查看原帖。"
         headline = self._headline_from_content(tweet.get("content", "")) or "热门动态"
         if tweet.get("source_category") == HOMEPAGE_CATEGORY:
             return self._truncate(f"首页热点（{headline}）：作者正文：{tweet['content']}", 120)
