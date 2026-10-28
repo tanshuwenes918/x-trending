@@ -12,7 +12,7 @@ from exporters.feishu_exporter import FeishuExporter
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REGION_NOTE = "地区标签表示内容涉及地区，不代表当地热榜排名。"
+REGION_NOTE = "地区标签区分特定地区关联与全球／通用话题，不代表当地热榜排名。"
 
 
 def source(**overrides):
@@ -61,13 +61,20 @@ def test_regions_display_before_summary_in_post_and_preview_without_mutating_sou
 
 
 @pytest.mark.parametrize("regions", [[], None, "日本", [{"evidence": "没有地区名称"}], [{"name": "  "}]])
-def test_unknown_region_is_explicit_without_guessing_from_author(regions):
+def test_general_topics_without_a_specific_region_display_global(regions):
     exporter = FeishuExporter()
     item = source(author="KMbappe", related_regions=regions)
 
     for text in (post_text(exporter, report(item)), exporter.format_plain_text(report(item))):
-        assert f"1. 【涉及地区待确认】{item['summary']}" in text
+        assert f"1. 【全球】{item['summary']}" in text
         assert "【涉及：法国】" not in text
+
+
+def test_explicit_global_event_scope_displays_the_same_global_label():
+    exporter = FeishuExporter()
+    item = source(related_regions=[{"name": "全球", "basis": "content", "evidence": "全球门票"}])
+    for text in (post_text(exporter, report(item)), exporter.format_plain_text(report(item))):
+        assert f"1. 【全球】{item['summary']}" in text
 
 
 def test_actions_can_show_regions_without_changing_metrics_or_links():

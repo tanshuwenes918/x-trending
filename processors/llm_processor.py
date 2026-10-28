@@ -58,6 +58,13 @@ class LLMProcessor:
             if "editorial_candidates" in data and not data.get("editorial_applied"):
                 self._organize_report(data)
                 self.retry_checkpoint = deepcopy(data)
+            if data.get("editorial_applied") and not data.get("region_review_completed"):
+                # Saved reports from before region review also enter this step.
+                # Keep completed selection if the extra model request fails.
+                self.retry_checkpoint = deepcopy(data)
+                self._complete_report_regions(data)
+                data["region_review_completed"] = True
+                self.retry_checkpoint = deepcopy(data)
             payload = self._build_payload(data)
             result = self._responses_json(payload)
             self._merge_result(data, result)
@@ -86,6 +93,52 @@ class LLMProcessor:
             data.clear()
             data.update(organized)
 
+    def _complete_report_regions(self, data: Dict[str, Any]) -> None:
+        """Review final subjects' region associations without changing selection."""
+        from processors.region_resolver import RegionResolver
+
+        reviews = RegionResolver().resolve(
+            data,
+            request_json=lambda payload, prompt: self._responses_json(payload, prompt=prompt),
+        )
+        selected = {
+            item["tweet_url"]: item
+            for group in data.get("groups", [])
+            for item in group.get("items", [])
+        }
+        updates = {}
+        event_updates = {}
+        for review in reviews:
+            item = selected[review["tweet_url"]]
+            regions = deepcopy(item.get("related_regions", []))
+            names = {region["name"] for region in regions}
+            for region in review["related_regions"]:
+                if region["name"] not in names:
+                    regions.append(deepcopy(region))
+                    names.add(region["name"])
+            global_region = next((region for region in review["related_regions"] if region["name"] == "全球"), None)
+            if global_region is not None:
+                # A worldwide release/rollout describes this event's scope;
+                # the company's home country must not replace that scope.
+                regions = [deepcopy(global_region)]
+            notes = list(dict.fromkeys([
+                *item.get("region_review_notes", []), *review.get("region_review_notes", []),
+            ]))
+            update = {"related_regions": regions, "region_review_notes": notes,
+                      "region_scope": "specific" if regions and all(r["name"] != "全球" for r in regions) else "global",
+                      "region_review_reason": review["region_review_reason"]}
+            updates[item["tweet_url"]] = update
+            if item.get("event_id"):
+                event_updates[item["event_id"]] = update
+
+        # All response validation finishes before any report data is modified.
+        # Keep display items, event provenance and existing actions in sync.
+        targets = [*selected.values(), *data.get("editorial_metadata", []), *data.get("top_actions", [])]
+        for target in targets:
+            update = updates.get(target.get("tweet_url")) or event_updates.get(target.get("event_id"))
+            if update is not None:
+                target.update(deepcopy(update))
+
     def _configured(self) -> bool:
         return bool(self.enabled and self.api_key and self.base_url and self.model)
 
@@ -104,6 +157,7 @@ class LLMProcessor:
                         "author_name": item.get("author_name", ""),
                         "subject_label": item.get("subject_label", ""),
                         "related_regions": item.get("related_regions", []),
+                        "region_scope": item.get("region_scope", ""),
                         "editorial_sensitive": item.get("editorial_sensitive", False),
                         "source_categories": item.get("source_categories", []),
                         "homepage_rank": item.get("homepage_rank"),
@@ -180,7 +234,7 @@ class LLMProcessor:
             "对输入的每个分组、每条推文逐条输出一句摘要，保留原组名与原链接，不遗漏、合并或删除条目，不在摘要里写引流动作。"
             "围绕事件主体、作品、产品或人物写摘要，不用“作者称”“作者提及”等泛化套话代替主要内容；确属未核实的指称或传闻时清楚标注其性质。"
             "仅基于作者正文 content 和可用的媒体替代描述 media_alt_texts 概述，作者与媒体描述必须区分。媒体替代描述不等于作者正文或已核实事实。"
-            "subject_label 是经过整理的可读主体名称线索，related_regions 是涉及地区，不代表该地区热榜排名；名称线索可用于识别人物或作品，但不提供图片里的事件事实。"
+            "subject_label 是经过整理的可读主体名称线索，related_regions 是涉及地区，region_scope=global 表示全球范围或无特定地区的通用话题，不代表各国热榜排名；名称线索可用于识别人物或作品，但不提供图片里的事件事实。"
             "主体名称优先沿用 subject_label；已可辨认的外文人物、IP和品牌名保留原名，不自行音译成陌生或不准确的中文名，例如 Calvin Klein 保留 Calvin Klein。"
             "本请求没有提供图像或视频内容，不能凭链接、作者身份、热度或常识推断媒体画面、事件原因或账号被盗。不要把读者添加的社区注释当作作者观点。"
             "media_requires_review=true 表示纯媒体且缺少有效描述，只能使用可读主体名称及原账号说明媒体动态受到关注、具体内容需查看原帖，不猜测事件，也不生成引流动作。"
@@ -517,6 +571,8 @@ class LLMProcessor:
             )
             if "related_regions" in source_item:
                 top_actions[-1]["related_regions"] = deepcopy(source_item["related_regions"])
+            if "region_scope" in source_item:
+                top_actions[-1]["region_scope"] = source_item["region_scope"]
             if len(top_actions) >= TOP_ACTION_COUNT:
                 break
 

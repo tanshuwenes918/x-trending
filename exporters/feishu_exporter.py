@@ -53,7 +53,7 @@ class FeishuExporter:
         timestamp = data.get("timestamp", "")
         blocks: List[List[Dict[str, str]]] = []
         if self._has_region_metadata(data):
-            blocks.append(self._text_line("地区标签表示内容涉及地区，不代表当地热榜排名。"))
+            blocks.append(self._text_line("地区标签区分特定地区关联与全球／通用话题，不代表当地热榜排名。"))
 
         for index, group in enumerate(data.get("groups", []), start=1):
             group_name = group.get("name", "")
@@ -100,7 +100,7 @@ class FeishuExporter:
             "",
         ]
         if self._has_region_metadata(data):
-            lines.extend(["地区标签表示内容涉及地区，不代表当地热榜排名。", ""])
+            lines.extend(["地区标签区分特定地区关联与全球／通用话题，不代表当地热榜排名。", ""])
 
         for index, group in enumerate(data.get("groups", []), start=1):
             group_name = group.get("name", "")
@@ -144,7 +144,7 @@ class FeishuExporter:
             name = " ".join(region["name"].split())
             if name and name not in names:
                 names.append(name)
-        return f"【涉及：{'／'.join(names)}】" if names else "【涉及地区待确认】"
+        return "【全球】" if not names or "全球" in names else f"【涉及：{'／'.join(names)}】"
 
     def _post_message(self, message: Dict[str, Any]) -> bool:
         """Post message to Feishu webhook."""
