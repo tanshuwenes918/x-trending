@@ -12,8 +12,6 @@
 
 普通定时运行、未填写 `retry_from_run` 的手动运行，都会重新抓取最新数据。只有明确填写旧任务 ID 时才尝试复用旧数据，不会自动拿某一天的数据连续生成后续日报。
 
-常用入口：[运行与历史任务](https://github.com/tanshuwenes918/x-trending/actions/workflows/daily-trending.yml) · [Actions Secrets](https://github.com/tanshuwenes918/x-trending/settings/secrets/actions) · [工作流配置](.github/workflows/daily-trending.yml)
-
 ## 日常使用
 
 ### 手动生成日报
