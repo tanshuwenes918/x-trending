@@ -92,16 +92,16 @@ def test_x_verification_failure_has_an_actionable_safe_reason(pipeline, marker):
 
     output = pipeline.output_file.read_text(encoding="utf-8")
     assert "failure_stage=X 抓取\n" in output
-    assert "Chrome/Edge" in output
-    assert "抓取账号" in output
-    assert "确认能看到推文" in output
-    assert "重新导出该浏览器最新登录会话" in output
-    assert "X_STORAGE_STATE_B64" in output
-    assert "X_COOKIES" in output
-    assert "同一账号的新 cookies" in output
-    assert "新建 Actions 运行" in output
-    assert "retry_from_run 留空" in output
-    assert "不会自动更新 Actions" in output
+    verification = output.index("请账号负责人先在浏览器完成验证")
+    maintainer = output.index("完成后请通知项目维护人")
+    session_update = output.index("由维护人更新自动抓取的登录状态")
+    recovery = output.index("并确认恢复")
+    assert verification < maintainer < session_update < recovery
+    assert "确认能正常查看趋势页" in output
+    assert "仅完成浏览器验证，还不能视为任务已恢复" in output
+    assert "X_STORAGE_STATE_B64" not in output
+    assert "X_COOKIES" not in output
+    assert "retry_from_run" not in output
     assert "private-value" not in output
     pipeline.exporter.export.assert_not_called()
 
@@ -111,6 +111,21 @@ def test_success_does_not_emit_failure_outputs(pipeline):
 
     assert not pipeline.output_file.exists()
     pipeline.exporter.export.assert_called_once()
+
+
+def test_model_failure_directs_api_configuration_recovery_to_maintainer(pipeline):
+    pipeline.llm.enrich.side_effect = RuntimeError("private-api-key=private-value")
+
+    with pytest.raises(SystemExit):
+        entrypoint.main()
+
+    output = pipeline.output_file.read_text(encoding="utf-8")
+    assert "LLM API 调用异常" in output
+    assert "项目维护人" in output
+    assert "Actions Secrets" in output
+    assert "必要时更换可用 API" in output
+    assert "补跑本次日报" in output
+    assert "private-value" not in output
 
 
 @pytest.mark.parametrize("github_output_unavailable", ["unset", "unwritable"])
