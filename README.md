@@ -182,6 +182,14 @@ Scheduled runs always scrape fresh X data. Normal manual runs also scrape fresh 
 
 To recover an LLM failure, open **Run workflow**, explicitly set `retry_from_run` to the failed run's numeric ID, and choose JSON output with `dry_run=true` for verification. The workflow downloads that run's `x-trending-output` artifact and reuses its `retry_input_*.json`, skipping X scraping. This mode generates a report for the original collection time. **Re-run jobs** preserves a run's original inputs; use a new normal run with `retry_from_run` blank to collect fresh data.
 
+Failed runs automatically send one alert to the existing Feishu bot. The alert includes the failure stage, a safe troubleshooting hint, Beijing time, run ID, attempt number, and a link to the task logs. Successful runs send their normal report without a failure alert. `dry_run` skips daily-report delivery; it does not suppress failure alerts.
+
+The alert runs in a separate job without checkout or Python dependencies, so it can also report dependency installation, test, artifact upload, and scrape-job timeout failures. It does not expose raw exceptions, API keys, cookies, or webhook URLs. If a later step fails after report delivery, the alert does not assume that no report was sent.
+
+To verify delivery, enable **test_failure_alert** in **Run workflow**. This intentionally fails before checkout, scraping, or report generation, then sends a clearly labeled test alert. The test run is expected to appear failed. Leave this option disabled for ordinary runs.
+
+Alerts require GitHub to start the workflow and the Feishu webhook to remain reachable. A workflow that never starts, or a failure of the notification channel itself, cannot be reported through this mechanism.
+
 Required repository secrets:
 
 - `X_STORAGE_STATE_B64` or `X_COOKIES`

@@ -32,6 +32,11 @@ on:
         description: "Optional failed run ID to reuse; leave blank to scrape fresh X data"
         required: false
         default: ""
+      test_failure_alert:
+        description: "Test Feishu failure alerts only; intentionally fails without scraping or sending a daily report"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,6 +50,9 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      failure_stage: ${{ steps.scrape.outputs.failure_stage || steps.retry.outputs.failure_stage }}
+      failure_reason: ${{ steps.scrape.outputs.failure_reason || steps.retry.outputs.failure_reason }}
 
     env:
       FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
@@ -73,6 +81,10 @@ jobs:
       LOOKBACK_HOURS: 24
 
     steps:
+      - name: Simulate failure for alert test
+        if: ${{ inputs.test_failure_alert }}
+        run: exit 1
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -107,10 +119,12 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Scrape and export
+        id: scrape
         if: ${{ inputs.retry_from_run == '' }}
         run: python main.py
 
       - name: Retry saved input and export
+        id: retry
         if: ${{ inputs.retry_from_run != '' }}
         run: |
           python - <<'PY'
@@ -132,3 +146,110 @@ jobs:
           name: x-trending-output
           path: outputs/*.json
           if-no-files-found: ignore
+
+  notify_failure:
+    needs: scrape
+    if: ${{ always() && needs.scrape.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: read
+    steps:
+      - name: Notify Feishu of failed daily report
+        uses: actions/github-script@v7
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          FAILED_STAGE: ${{ needs.scrape.outputs.failure_stage }}
+          FAILED_REASON: ${{ needs.scrape.outputs.failure_reason }}
+          IS_ALERT_TEST: ${{ inputs.test_failure_alert || false }}
+        with:
+          script: |
+            const webhook = process.env.FEISHU_WEBHOOK_URL;
+            if (!webhook) {
+              core.setFailed('Feishu alert webhook is not configured.');
+              return;
+            }
+            const isTest = process.env.IS_ALERT_TEST === 'true';
+            const attempt = Number(process.env.GITHUB_RUN_ATTEMPT || 1);
+            let stage = process.env.FAILED_STAGE || '';
+            let reason = process.env.FAILED_REASON || '请打开任务日志查看失败原因。';
+            if (isTest) {
+              stage = '告警链路测试';
+              reason = '这是一条测试消息，用于确认失败告警可以送达；本次没有抓取 X 或发送日报。';
+            } else if (!stage) {
+              try {
+                const { data } = await github.rest.actions.listJobsForWorkflowRunAttempt({
+                  ...context.repo,
+                  run_id: context.runId,
+                  attempt_number: attempt,
+                  per_page: 100,
+                });
+                const job = data.jobs.find(item => item.name === 'scrape');
+                const failedStep = job?.steps?.find(step =>
+                  ['failure', 'timed_out'].includes(step.conclusion));
+                const stages = {
+                  'Checkout': '检出代码',
+                  'Set up Python': '准备 Python 环境',
+                  'Cache Playwright browsers': '准备浏览器缓存',
+                  'Install dependencies': '安装依赖',
+                  'Run tests': '运行测试',
+                  'Download saved retry input': '下载补跑数据',
+                  'Scrape and export': '抓取、摘要或推送',
+                  'Retry saved input and export': '使用保存数据生成日报',
+                  'Upload JSON output': '上传日报数据附件',
+                };
+                stage = stages[failedStep?.name] || '任务执行或超时';
+                if (failedStep?.name === 'Upload JSON output') {
+                  reason = '保存任务附件失败，日报可能已经推送，请先查看群消息和任务日志。';
+                }
+              } catch {
+                core.warning('Could not identify the failed step; sending a general alert.');
+              }
+            }
+            stage ||= '任务执行';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const time = new Date().toLocaleString('zh-CN', {
+              timeZone: 'Asia/Shanghai', hour12: false,
+            });
+            const line = text => [{ tag: 'text', text }];
+            const payload = {
+              msg_type: 'post',
+              content: { post: { zh_cn: {
+                title: isTest ? '🧪 X 日报失败告警测试' : '⚠️ X 日报任务失败',
+                content: [
+                  line(`北京时间：${time}`),
+                  line(`失败环节：${stage}`),
+                  line('排查提示：'),
+                  ...reason.split('；').filter(Boolean).map(part => line(part.trim())),
+                  line(`任务 ID：${context.runId}；第 ${attempt} 次尝试`),
+                  [{ tag: 'a', text: '查看任务详情与日志', href: runUrl }],
+                ],
+              } } },
+            };
+            if (process.env.FEISHU_SECRET) {
+              const { createHmac } = require('node:crypto');
+              payload.timestamp = String(Math.floor(Date.now() / 1000));
+              payload.sign = createHmac('sha256', `${payload.timestamp}\n${process.env.FEISHU_SECRET}`)
+                .update('').digest('base64');
+            }
+            try {
+              const response = await fetch(webhook, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(15000),
+              });
+              if (!response.ok) {
+                core.setFailed(`Feishu failure alert was rejected (HTTP ${response.status}).`);
+                return;
+              }
+              const result = await response.json();
+              if ((result.code ?? result.StatusCode) !== 0) {
+                core.setFailed('Feishu failure alert was rejected; check the webhook and signing settings.');
+                return;
+              }
+              core.info('Failure alert sent to Feishu successfully.');
+            } catch {
+              core.setFailed('Feishu failure alert could not be confirmed; check the webhook, signing settings, and network.');
+            }
