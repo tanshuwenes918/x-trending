@@ -13,6 +13,8 @@ import processors.data_processor as processor_module
 import processors.llm_processor as llm_module
 import scrapers.trending_scraper as scraper_module
 
+RealDataProcessor = processor_module.DataProcessor
+
 
 @pytest.fixture
 def pipeline(monkeypatch, tmp_path):
@@ -133,3 +135,40 @@ def test_checkpoint_write_error_does_not_replace_original_llm_failure(pipeline, 
     assert "LLM server overloaded" in caplog.text
     assert not list(pipeline.output_dir.glob("x_trending_*.json"))
     pipeline.exporter.export.assert_not_called()
+
+
+def test_summary_failure_preserves_validated_editing_checkpoint(pipeline):
+    edited = deepcopy(pipeline.report)
+    edited.update(editorial_applied=True, editorial_metadata=[{"tweet_url": "https://x.com/u/status/1"}])
+    pipeline.llm.retry_checkpoint = edited
+    pipeline.llm.enrich.side_effect = RuntimeError("Summary temporarily unavailable")
+
+    with pytest.raises(SystemExit):
+        entrypoint.main()
+
+    checkpoint = next(pipeline.output_dir.glob("retry_input_*.json"))
+    assert entrypoint.read_json_input(checkpoint) == edited
+    pipeline.exporter.export.assert_not_called()
+
+
+def test_raw_candidate_replay_skips_x_and_keeps_original_collection_time(pipeline):
+    raw = {
+        "collected_at": "2026-10-28T07:20:35Z",
+        "raw_data": {"Global": {"Sports": [{"tweets": [{
+            "author": "KMbappe", "created_at": "2026-10-27T11:39:09Z", "content": "",
+            "media_types": ["image"], "tweet_url": "https://x.com/KMbappe/status/1",
+        }]}]}},
+    }
+    input_path = pipeline.output_dir / "raw_candidates.json"
+    import json
+    input_path.write_text(json.dumps(raw), encoding="utf-8")
+    pipeline.args.input_json = str(input_path)
+    pipeline.processor.process.side_effect = RealDataProcessor().process
+
+    entrypoint.main()
+
+    pipeline.scraper.scrape_all.assert_not_called()
+    args, kwargs = pipeline.processor.process.call_args
+    assert args == (raw["raw_data"],) and kwargs == {"reference_time": raw["collected_at"]}
+    written = entrypoint.read_json_input(next(pipeline.output_dir.glob("x_trending_*.json")))
+    assert written["timestamp"] == "2026-10-28T15:20:35+08:00"

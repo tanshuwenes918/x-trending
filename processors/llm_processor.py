@@ -3,13 +3,13 @@
 import json
 import logging
 import re
+from copy import deepcopy
 from itertools import chain
 from typing import Any, Dict, Iterable, Iterator, Tuple
 from urllib import request
 from urllib.error import HTTPError, URLError
 
 from config.settings import (
-    HOMEPAGE_CATEGORY,
     HOMEPAGE_GROUP_NAME,
     LLM_API_KEY,
     LLM_BASE_URL,
@@ -40,9 +40,11 @@ class LLMProcessor:
         self.model = model
         self.enabled = enabled
         self.required = required
+        self.retry_checkpoint = None
 
     def enrich(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Enrich group summaries and top actions with an LLM if configured."""
+        self.retry_checkpoint = None
         if not self._configured():
             if self.required:
                 raise RuntimeError(
@@ -53,6 +55,9 @@ class LLMProcessor:
             return data
 
         try:
+            if "editorial_candidates" in data and not data.get("editorial_applied"):
+                self._organize_report(data)
+                self.retry_checkpoint = deepcopy(data)
             payload = self._build_payload(data)
             result = self._responses_json(payload)
             self._merge_result(data, result)
@@ -64,6 +69,22 @@ class LLMProcessor:
             data["llm_used"] = False
 
         return data
+
+    def _organize_report(self, data: Dict[str, Any]) -> None:
+        """Classify and group every source before summarizing the final stories."""
+        from processors.data_processor import DataProcessor
+        from processors.report_editor import ReportEditor
+
+        metadata = ReportEditor().organize(
+            data["editorial_candidates"],
+            request_json=lambda payload, prompt: self._responses_json(payload, prompt=prompt),
+        )
+        organized = DataProcessor().apply_editorial_metadata(data, metadata)
+        # Keep the caller's dictionary identity so a later summary failure can
+        # checkpoint the completed organization step instead of repeating it.
+        if isinstance(organized, dict) and organized is not data:
+            data.clear()
+            data.update(organized)
 
     def _configured(self) -> bool:
         return bool(self.enabled and self.api_key and self.base_url and self.model)
@@ -81,6 +102,9 @@ class LLMProcessor:
                         "content": item.get("content", ""),
                         "author": item.get("author", ""),
                         "author_name": item.get("author_name", ""),
+                        "subject_label": item.get("subject_label", ""),
+                        "related_regions": item.get("related_regions", []),
+                        "editorial_sensitive": item.get("editorial_sensitive", False),
                         "source_categories": item.get("source_categories", []),
                         "homepage_rank": item.get("homepage_rank"),
                         "media_types": item.get("media_types", []),
@@ -98,28 +122,9 @@ class LLMProcessor:
             groups.append({"name": group.get("name", ""), "items": items})
         return {"groups": groups}
 
-    def _responses_json(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        prompt = (
-            "你是一个 AI 音乐生成与 AI 视频生成产品的站外增长运营负责人，产品类似 Vanso，目标是从 X 等站外平台找到可转化的内容机会。"
-            "请基于输入的 X 热门推文生成简洁中文日报素材。所有输出必须是中文，并优先服务于运营选题、素材生产、评论区导流和落地页转化。"
-            "对输入的每个分组、每条推文逐条输出一句摘要，保留原组名与原链接，不遗漏、合并或删除条目，不在摘要里写引流动作。"
-            "仅基于作者正文 content 和可用的媒体替代描述 media_alt_texts 概述，作者与媒体描述必须区分。媒体替代描述不等于作者正文或已核实事实。"
-            "本请求没有提供图像或视频内容，不能凭链接、作者身份、热度或常识推断媒体画面、事件原因或账号被盗。不要把读者添加的社区注释当作作者观点。"
-            "media_requires_review=true 表示纯媒体且缺少有效描述，只能说明该作者的媒体动态受到关注、具体内容需查看原帖，不猜测事件，也不生成引流动作。"
-            "首页热点可能没有可靠主题分类，只做事实概述，不生成引流动作。对事实明确的非敏感分类内容，可点出情绪、模板化潜力、声音/音乐/视频化潜力或传播机制。"
-            "摘要格式必须是“话题名（新闻标题）：简要描述”。"
-            "新闻标题用 4 到 18 个中文字符概括事件核心；简要描述用一句话说明这条推文发布了什么、发生了什么或为什么在传播。"
-            "不要直译原推文，不要保留英文分类前缀，不要写“摘要：”“链接：”。"
-            "遇到政治、宗教、暴力、仇恨、灾难、犯罪、医疗诊断等敏感内容，只做克制中性概述，不输出引流建议。"
-            f"最后从所有低风险候选里选出最适合给 AI 音乐/AI 视频产品获客的 {TOP_ACTION_COUNT} 条，输出标题和引流动作。"
-            "优先选择能改造成以下资产的热点：AI 音乐模板、AI MV/短视频模板、角色配音/变声挑战、情绪 BGM、歌词改写、梗图转视频、分镜脚本、口播脚本、评论区关键词领取素材包。"
-            "引流动作必须是可执行的一句话，包含内容形式、用户参与方式和导流方式，例如“发起 X 挑战，提供 3 个模板，评论区关键词领取并跳转生成页”。"
-            "动作要自然贴合原热点，不要只写泛泛的“做模板”“发视频”；尽量明确适合用 AI 音乐、AI 配音、AI 视频或落地页素材包承接。"
-            "不要选择新闻敏感、版权高风险、名人肖像高风险或需要事实核验的内容做引流动作。"
-            "只返回 JSON，不要返回 Markdown。格式："
-            '{"groups":[{"name":"分类名","items":[{"tweet_url":"原链接","summary":"话题名（新闻标题）：简要描述"}]}],'
-            '"top_actions":[{"title":"短标题","action":"一句引流动作","tweet_url":"原链接"}]}'
-        )
+    def _responses_json(self, payload: Dict[str, Any], prompt: str | None = None) -> Dict[str, Any]:
+        if prompt is None:
+            prompt = self._summary_prompt()
         body = {
             "model": self.model,
             "stream": True,
@@ -167,6 +172,31 @@ class LLMProcessor:
             raise RuntimeError(f"LLM request failed: {exc}") from exc
 
         return self._parse_json_content(content)
+
+    def _summary_prompt(self) -> str:
+        return (
+            "你是一个 AI 音乐生成与 AI 视频生成产品的站外增长运营负责人，产品类似 Vanso，目标是从 X 等站外平台找到可转化的内容机会。"
+            "请基于输入的 X 热门推文生成简洁中文日报素材。所有输出必须是中文，并优先服务于运营选题、素材生产、评论区导流和落地页转化。"
+            "对输入的每个分组、每条推文逐条输出一句摘要，保留原组名与原链接，不遗漏、合并或删除条目，不在摘要里写引流动作。"
+            "围绕事件主体、作品、产品或人物写摘要，不用“作者称”“作者提及”等泛化套话代替主要内容；确属未核实的指称或传闻时清楚标注其性质。"
+            "仅基于作者正文 content 和可用的媒体替代描述 media_alt_texts 概述，作者与媒体描述必须区分。媒体替代描述不等于作者正文或已核实事实。"
+            "subject_label 是经过整理的可读主体名称线索，related_regions 是涉及地区，不代表该地区热榜排名；名称线索可用于识别人物或作品，但不提供图片里的事件事实。"
+            "本请求没有提供图像或视频内容，不能凭链接、作者身份、热度或常识推断媒体画面、事件原因或账号被盗。不要把读者添加的社区注释当作作者观点。"
+            "media_requires_review=true 表示纯媒体且缺少有效描述，只能使用可读主体名称及原账号说明媒体动态受到关注、具体内容需查看原帖，不猜测事件，也不生成引流动作。"
+            "对事实明确的非敏感分类内容，可点出情绪、模板化潜力、声音/音乐/视频化潜力或传播机制。"
+            "摘要格式必须是“话题名（新闻标题）：简要描述”。"
+            "新闻标题用 4 到 18 个中文字符概括事件核心；简要描述用一句话说明这条推文发布了什么、发生了什么或为什么在传播。"
+            "不要直译原推文，不要保留英文分类前缀，不要写“摘要：”“链接：”。"
+            "遇到政治、宗教、暴力、仇恨、灾难、犯罪、医疗诊断等敏感内容，只做克制中性概述，不输出引流建议。"
+            f"最后从所有低风险候选里选出最适合给 AI 音乐/AI 视频产品获客的 {TOP_ACTION_COUNT} 条，输出标题和引流动作。"
+            "优先选择能改造成以下资产的热点：AI 音乐模板、AI MV/短视频模板、角色配音/变声挑战、情绪 BGM、歌词改写、梗图转视频、分镜脚本、口播脚本、评论区关键词领取素材包。"
+            "引流动作必须是可执行的一句话，包含内容形式、用户参与方式和导流方式，例如“发起 X 挑战，提供 3 个模板，评论区关键词领取并跳转生成页”。"
+            "动作要自然贴合原热点，不要只写泛泛的“做模板”“发视频”；尽量明确适合用 AI 音乐、AI 配音、AI 视频或落地页素材包承接。"
+            "不要选择新闻敏感、版权高风险、名人肖像高风险或需要事实核验的内容做引流动作。"
+            "只返回 JSON，不要返回 Markdown。格式："
+            '{"groups":[{"name":"分类名","items":[{"tweet_url":"原链接","summary":"话题名（新闻标题）：简要描述"}]}],'
+            '"top_actions":[{"title":"短标题","action":"一句引流动作","tweet_url":"原链接"}]}'
+        )
 
     def _chat_completions_json(self, payload: Dict[str, Any], prompt: str) -> Dict[str, Any]:
         """Use the same instructions and source data on a Chat-only provider."""
@@ -443,8 +473,8 @@ class LLMProcessor:
                     categories.add(item.get("source_category", ""))
                     if (
                         group_name in {"News / Society / Sensitive Topics", HOMEPAGE_GROUP_NAME}
-                        or HOMEPAGE_CATEGORY in categories
                         or any(str(category).strip().lower() in {"news", "religion"} for category in categories)
+                        or item.get("editorial_sensitive")
                         or tweet_url in media_review_urls
                     ):
                         unsafe_urls.add(tweet_url)
