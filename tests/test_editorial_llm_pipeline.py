@@ -35,6 +35,17 @@ def old_report():
     return {"groups": [{"name": "Music / Dance / Entertainment", "items": [source(1)]}], "top_actions": []}
 
 
+def test_recommended_actions_keep_the_selected_sources_region_evidence():
+    data = old_report()
+    item = data["groups"][0]["items"][0]
+    item["related_regions"] = [{"name": "日本", "basis": "content", "evidence": "Japan"}]
+    configured_processor()._merge_result(data, {
+        "groups": [], "top_actions": [{"tweet_url": item["tweet_url"], "title": "创作主题", "action": "提供音乐模板"}],
+    })
+    assert data["top_actions"][0]["related_regions"] == item["related_regions"]
+    assert data["top_actions"][0]["related_regions"] is not item["related_regions"]
+
+
 def test_all_candidates_are_organized_before_only_final_items_are_summarized(monkeypatch):
     processor = configured_processor()
     candidates = [source(number) for number in range(50)]

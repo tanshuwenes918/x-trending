@@ -433,6 +433,8 @@ class DataProcessor:
                     "views": item.get("views", 0),
                 }
             )
+            if "related_regions" in item:
+                actions[-1]["related_regions"] = deepcopy(item["related_regions"])
         return actions
 
     def _headline_from_content(self, content: str) -> str:

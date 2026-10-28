@@ -514,6 +514,8 @@ class LLMProcessor:
                     "views": source_item.get("views", 0),
                 }
             )
+            if "related_regions" in source_item:
+                top_actions[-1]["related_regions"] = deepcopy(source_item["related_regions"])
             if len(top_actions) >= TOP_ACTION_COUNT:
                 break
 
