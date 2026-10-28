@@ -253,6 +253,7 @@ def test_scrape_all_does_not_swallow_session_failure_in_category_loop(monkeypatc
     scraper = TrendingScraper()
     page = make_page(ready=True)
     browser = bind_browser(monkeypatch, scraper, page)
+    monkeypatch.setattr(scraper, "_collect_category_tweets", lambda page: [{"tweet_url": "https://x.com/u/status/1", "author": "creator", "created_at": "2026-10-28T05:00:00Z", "content": "Homepage"}])
     scrape_category = MagicMock(side_effect=scraper_module.ScrapeError("X session requires verification"))
     monkeypatch.setattr(scraper, "scrape_country_category", scrape_category)
 
@@ -267,6 +268,7 @@ def test_scrape_all_keeps_nonempty_results_and_closes_browser(monkeypatch):
     scraper = TrendingScraper()
     page = make_page(ready=True)
     browser = bind_browser(monkeypatch, scraper, page)
+    monkeypatch.setattr(scraper, "_collect_category_tweets", lambda page: [{"tweet_url": "https://x.com/u/status/1", "author": "creator", "created_at": "2026-10-28T05:00:00Z", "content": "Homepage"}])
     category_data = [{"trending_term": "Technology", "tweets": [{"tweet_url": "https://x.com/u/status/1"}]}]
     monkeypatch.setattr(scraper, "scrape_country_category", MagicMock(return_value=category_data))
 
@@ -287,6 +289,7 @@ def offline_pipeline(monkeypatch, tmp_path):
     monkeypatch.setattr(entrypoint, "parse_args", lambda: args)
     monkeypatch.setattr(entrypoint, "load_dotenv", MagicMock())
     monkeypatch.setattr(settings, "DRY_RUN", False)
+    monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path)
 
     pipeline = MagicMock()
     pipeline.args = args

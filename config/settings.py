@@ -58,6 +58,10 @@ DEFAULT_CATEGORIES: List[str] = [
     "Home & Garden",
 ]
 
+# The default feed is collected before category navigation, not as a category button.
+HOMEPAGE_CATEGORY = "Global Trending"
+HOMEPAGE_GROUP_NAME = "Global Trending / 首页热点"
+
 CATEGORY_GROUPS: Dict[str, List[str]] = {
     "AI / Tech / Creator Tools": [
         "Technology",
@@ -117,7 +121,7 @@ MAX_ITEMS_PER_GROUP = _int_env("MAX_ITEMS_PER_GROUP", 7)
 TOP_ACTION_COUNT = _int_env("TOP_ACTION_COUNT", 5)
 LOOKBACK_HOURS = _int_env("LOOKBACK_HOURS", 24)
 X_BASE_URL = os.getenv("X_BASE_URL", "https://x.com")
-X_EXPLORE_URL = os.getenv("X_EXPLORE_URL", f"{X_BASE_URL}/explore/tabs/trending")
+X_EXPLORE_URL = os.getenv("X_EXPLORE_URL", f"{X_BASE_URL}/i/jf/global-trending/home")
 X_CATEGORY_URL_TEMPLATE = os.getenv("X_CATEGORY_URL_TEMPLATE", "")
 X_COOKIES = os.getenv("X_COOKIES", "")
 X_STORAGE_STATE = os.getenv("X_STORAGE_STATE", "")

@@ -6,7 +6,7 @@ import logging
 import re
 import base64
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -58,7 +58,7 @@ class TrendingScraper:
         return data
 
     def _scrape_with_browser(self, browser, data) -> None:
-        from config.settings import CATEGORIES, COUNTRIES, X_EXPLORE_URL
+        from config.settings import CATEGORIES, COUNTRIES, HOMEPAGE_CATEGORY, X_EXPLORE_URL
 
         context_options = {
             "viewport": {"width": 1400, "height": 1000},
@@ -83,6 +83,31 @@ class TrendingScraper:
         page.goto(X_EXPLORE_URL, wait_until="domcontentloaded", timeout=60000)
         self._wait_for_global_trending_ready(page)
         logger.info("Loaded X page: %s", page.url)
+
+        # The default feed contains major stories that may not be repeated in
+        # any of the category feeds. Capture it before clicking away from it.
+        homepage_tweets = self._collect_category_tweets(page)
+        self._assert_page_accessible(page)
+        if not homepage_tweets:
+            raise ScrapeError(
+                "X trending homepage returned no usable tweets. "
+                "Check the page and extraction before sending a partial report."
+            )
+        if not any(tweet.get("author") and self._valid_created_at(tweet.get("created_at")) for tweet in homepage_tweets):
+            raise ScrapeError(
+                "X trending homepage tweets are missing valid author/timestamp metadata. "
+                "Check extraction before sending a partial report."
+            )
+        for rank, tweet in enumerate(homepage_tweets, start=1):
+            tweet["homepage_rank"] = rank
+        logger.info("Collected %d tweets for the trending homepage", len(homepage_tweets))
+        # The configured landing page is global; do not mislabel it as a
+        # country-specific feed when additional countries are configured.
+        data.setdefault("Global", {})[HOMEPAGE_CATEGORY] = [{
+            "trending_term": HOMEPAGE_CATEGORY,
+            "tweets": homepage_tweets,
+            "scraped_at": datetime.now(timezone.utc).isoformat(),
+        }]
 
         for country in COUNTRIES:
             for category in CATEGORIES:
@@ -129,7 +154,7 @@ class TrendingScraper:
             {
                 "trending_term": category,
                 "tweets": tweets,
-                "scraped_at": datetime.utcnow().isoformat(),
+                "scraped_at": datetime.now(timezone.utc).isoformat(),
             }
         ]
 
@@ -346,12 +371,18 @@ class TrendingScraper:
 
         tweets_by_url: Dict[str, Dict[str, Any]] = {}
 
+        try:
+            page.locator('article[data-testid="tweet"]').first.wait_for(timeout=15000)
+        except PlaywrightTimeoutError:
+            self._assert_page_accessible(page)
+            return []
+
         for scroll_index in range(SCROLLS_PER_CATEGORY + 1):
             self._assert_page_accessible(page)
             for article in page.locator('article[data-testid="tweet"]').all():
                 tweet = self._extract_tweet(article)
                 tweet_url = tweet.get("tweet_url", "")
-                if tweet_url and tweet.get("content"):
+                if tweet_url and (tweet.get("content") or tweet.get("media_urls") or tweet.get("media_types")):
                     tweets_by_url[tweet_url] = tweet
 
             if len(tweets_by_url) >= MAX_CANDIDATES_PER_CATEGORY:
@@ -366,6 +397,7 @@ class TrendingScraper:
         metrics = self._extract_metrics(article)
         return {
             "author": self._extract_author(article),
+            "author_name": self._extract_author_name(article),
             "content": self._extract_content(article),
             "created_at": self._extract_created_at(article),
             "likes": metrics["like"],
@@ -373,6 +405,8 @@ class TrendingScraper:
             "replies": metrics["reply"],
             "views": metrics["view"],
             "media_urls": self._extract_media_urls(article),
+            "media_types": self._extract_media_types(article),
+            "media_alt_texts": self._extract_media_alt_texts(article),
             "tweet_url": self._extract_tweet_url(article),
         }
 
@@ -380,6 +414,10 @@ class TrendingScraper:
         text = self._safe_inner_text(article.locator('[data-testid="User-Name"]').first)
         handle = re.search(r"@[\w_]+", text)
         return handle.group(0).lstrip("@") if handle else text.split("\n")[0].strip()
+
+    def _extract_author_name(self, article) -> str:
+        user_name = article.locator('[data-testid="User-Name"]').first
+        return self._safe_inner_text(user_name.locator('a').first)
 
     def _extract_content(self, article) -> str:
         parts = []
@@ -392,6 +430,14 @@ class TrendingScraper:
     def _extract_created_at(self, article) -> str:
         return self._safe_attr(article.locator("time").first, "datetime")
 
+    @staticmethod
+    def _valid_created_at(value) -> bool:
+        try:
+            datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return True
+        except ValueError:
+            return False
+
     def _extract_tweet_url(self, article) -> str:
         from config.settings import X_BASE_URL
 
@@ -400,11 +446,30 @@ class TrendingScraper:
 
     def _extract_media_urls(self, article) -> List[str]:
         urls = []
-        for locator in article.locator('img[src*="pbs.twimg.com/media"], video source[src]').all():
+        for locator in article.locator('img[src*="pbs.twimg.com/media"], video[src], video source[src], video[poster]').all():
             src = self._safe_attr(locator, "src")
+            if not src or src.startswith("blob:"):
+                src = self._safe_attr(locator, "poster")
             if src and src not in urls:
                 urls.append(src)
         return urls
+
+    def _extract_media_types(self, article) -> List[str]:
+        types = []
+        if article.locator('[data-testid="tweetPhoto"] img, img[src*="pbs.twimg.com/media"]').count():
+            types.append("image")
+        if article.locator('video, [data-testid="videoPlayer"]').count():
+            types.append("video")
+        return types
+
+    def _extract_media_alt_texts(self, article) -> List[str]:
+        descriptions = []
+        placeholders = {"image", "photo", "video", "animated gif", "图像", "圖片", "图片", "照片", "视频", "影片"}
+        for locator in article.locator('[data-testid="tweetPhoto"] img, img[src*="pbs.twimg.com/media"]').all():
+            text = " ".join(self._safe_attr(locator, "alt").split())
+            if text and text.casefold() not in placeholders and text not in descriptions:
+                descriptions.append(text)
+        return descriptions
 
     def _extract_metric(self, article, metric: str) -> int:
         selectors = {

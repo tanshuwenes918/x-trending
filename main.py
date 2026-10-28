@@ -61,6 +61,20 @@ def write_json_output(data: dict) -> Path:
     return output_path
 
 
+def write_raw_candidates(raw_data: dict) -> Path:
+    """Keep source candidates before filtering so missing stories are traceable."""
+    from config.settings import OUTPUT_DIR
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    collected_at = datetime.now(timezone.utc)
+    output_path = OUTPUT_DIR / f"raw_candidates_{collected_at.strftime('%Y%m%dT%H%M%S%fZ')}.json"
+    output_path.write_text(
+        json.dumps({"collected_at": collected_at.isoformat(), "raw_data": raw_data}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return output_path
+
+
 def write_retry_checkpoint(data: dict) -> Path:
     """Preserve a nonempty LLM input separately from completed daily reports."""
     from config.settings import OUTPUT_DIR
@@ -189,6 +203,8 @@ def main():
             stage = "X 抓取"
             raw_data = scraper.scrape_all()
             stage = "数据整理"
+            raw_path = write_raw_candidates(raw_data)
+            logger.info("Saved unfiltered source candidates to %s", raw_path)
             trending_data = processor.process(raw_data)
 
         stage = "数据整理"

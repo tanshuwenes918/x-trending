@@ -23,6 +23,7 @@ def pipeline(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path)
 
     observed = MagicMock()
+    observed.scraper.scrape_all.return_value = {"Global": {"Technology": [{"tweets": []}]}}
     observed.args = args
     observed.output_dir = tmp_path
     observed.report = {
