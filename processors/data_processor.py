@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 from config.settings import (
     CATEGORY_GROUPS,
     COUNTRIES,
+    HOMEPAGE_CATEGORY,
+    HOMEPAGE_GROUP_NAME,
     LOOKBACK_HOURS,
     MAX_ITEMS_PER_GROUP,
     TIMEZONE,
@@ -26,61 +28,81 @@ class DataProcessor:
 
         now = datetime.now(ZoneInfo(TIMEZONE))
         cutoff = now - timedelta(hours=LOOKBACK_HOURS)
+        candidates, diagnostics, has_homepage = self._collect_candidates(raw_data, cutoff)
         groups = self._empty_groups()
-        seen_tweets = set()
-        raw_tweet_count = 0
+        if has_homepage:
+            groups = {
+                HOMEPAGE_GROUP_NAME: {
+                    "name": HOMEPAGE_GROUP_NAME,
+                    "source_categories": [HOMEPAGE_CATEGORY],
+                    "items": [],
+                },
+                **groups,
+            }
 
-        for country, category_map in raw_data.items():
-            if not isinstance(category_map, dict):
-                logger.warning("Skipping invalid country payload: %s", country)
+        selected = {}
+        homepage_candidates = sorted(
+            (candidate for candidate in candidates.values() if candidate["homepage_order"] is not None),
+            key=lambda candidate: candidate["homepage_order"],
+        )
+        for candidate in homepage_candidates[:MAX_ITEMS_PER_GROUP]:
+            selected[candidate["item"]["tweet_url"]] = HOMEPAGE_GROUP_NAME
+
+        # Aggregate every source before selecting. A full first source group must
+        # not prevent a tweet from filling a slot in another source group.
+        group_urls = {name: [] for name in CATEGORY_GROUPS}
+        for tweet_url, candidate in sorted(
+            candidates.items(), key=lambda pair: self._score(pair[1]["item"]), reverse=True,
+        ):
+            if tweet_url not in selected:
+                self._assign_to_group(tweet_url, candidates, group_urls, selected, set())
+
+        for tweet_url, candidate in candidates.items():
+            record = diagnostics["tweets_by_key"][tweet_url]
+            group_name = selected.get(tweet_url)
+            if not group_name:
+                record.update(status="excluded", exclusion_reason="group_quota")
                 continue
 
-            for category, trends in category_map.items():
-                group_name = self._group_for_category(category)
-                if not group_name:
-                    logger.info("Skipping unmapped category: %s", category)
-                    continue
+            item = candidate["item"]
+            category = HOMEPAGE_CATEGORY if group_name == HOMEPAGE_GROUP_NAME else next(
+                category for category in record["source_categories"]
+                if self._group_for_category(category) == group_name
+            )
+            source = next(
+                (source for source in candidate["sources"] if source["category"] == category),
+                candidate["sources"][0],
+            )
+            term = source["trending_term"] if source["category"] == category else category
+            item.update(
+                country=source["country"], source_category=category,
+                source_categories=record["source_categories"], trending_term=term,
+                score=self._score(item),
+            )
+            item["summary"] = self._fallback_summary(item, term)
+            groups[group_name]["items"].append(item)
+            record.update(status="selected", selected_group=group_name)
 
-                for trend in trends or []:
-                    if not isinstance(trend, dict):
-                        continue
-
-                    trend_term = self._clean_text(trend.get("trending_term") or trend.get("term"))
-                    for tweet in trend.get("tweets", []):
-                        raw_tweet_count += 1
-                        cleaned = self._clean_tweet(tweet)
-                        if not cleaned:
-                            continue
-
-                        tweet_time = self._parse_datetime(cleaned["created_at"])
-                        if not tweet_time or tweet_time < cutoff:
-                            continue
-
-                        dedupe_key = cleaned["tweet_url"]
-                        if dedupe_key in seen_tweets:
-                            continue
-                        seen_tweets.add(dedupe_key)
-
-                        cleaned.update(
-                            {
-                                "country": country,
-                                "source_category": category,
-                                "trending_term": trend_term,
-                                "score": self._score(cleaned),
-                                "summary": self._fallback_summary(cleaned, trend_term),
-                            }
-                        )
-                        groups[group_name]["items"].append(cleaned)
-
-        for group in groups.values():
-            group["items"] = sorted(
-                group["items"],
-                key=lambda item: item.get("score", 0),
-                reverse=True,
-            )[:MAX_ITEMS_PER_GROUP]
+        for group_name, group in groups.items():
+            if group_name == HOMEPAGE_GROUP_NAME:
+                group["items"].sort(key=lambda item: candidates[item["tweet_url"]]["homepage_order"])
+            else:
+                group["items"].sort(key=lambda item: item.get("score", 0), reverse=True)
 
         group_list = list(groups.values())
         eligible_tweet_count = sum(len(group["items"]) for group in group_list)
+        records = list(diagnostics.pop("tweets_by_key").values())
+        for record in records:
+            record["occurrence_count"] = len(record["occurrences"])
+            if "status" not in record:
+                record.update(status="excluded", exclusion_reason=record["occurrences"][0]["reason"])
+        diagnostics["tweets"] = records
+        diagnostics["counts"].update(
+            valid_unique_urls=len(candidates),
+            selected_unique_urls=eligible_tweet_count,
+            excluded_unique_urls=sum(bool(record["tweet_url"]) and record["status"] == "excluded" for record in records),
+            quota_excluded_unique_urls=sum(record.get("exclusion_reason") == "group_quota" for record in records),
+        )
 
         return {
             "timestamp": now.isoformat(),
@@ -89,10 +111,11 @@ class DataProcessor:
             "countries": COUNTRIES,
             "groups": group_list,
             "top_actions": self._fallback_top_actions(group_list),
+            "processing_diagnostics": diagnostics,
             "summary": {
                 "country_count": len(COUNTRIES),
                 "group_count": len(group_list),
-                "raw_tweet_count": raw_tweet_count,
+                "raw_tweet_count": diagnostics["counts"]["raw_occurrences"],
                 "eligible_tweet_count": eligible_tweet_count,
                 "max_items_per_group": MAX_ITEMS_PER_GROUP,
             },
@@ -100,8 +123,123 @@ class DataProcessor:
 
     def validate_tweet(self, tweet: Dict[str, Any]) -> bool:
         """Validate a tweet record."""
-        required_fields = ["author", "content", "created_at", "tweet_url"]
-        return all(tweet.get(field) for field in required_fields)
+        required_fields = ["author", "created_at", "tweet_url"]
+        has_content = bool(tweet.get("content") or tweet.get("media_urls") or tweet.get("media_types"))
+        return all(tweet.get(field) for field in required_fields) and has_content
+
+    def _collect_candidates(self, raw_data: dict, cutoff: datetime):
+        """Keep URL provenance and filtering reasons before applying any quotas."""
+        candidates = {}
+        records = {}
+        homepage_orders = {}
+        has_homepage = False
+        counts = {
+            "raw_occurrences": 0, "unique_urls": 0, "duplicate_occurrences": 0,
+            "missing_url_occurrences": 0, "invalid_fields_occurrences": 0,
+            "invalid_timestamp_occurrences": 0, "outside_lookback_occurrences": 0,
+            "unmapped_category_occurrences": 0,
+        }
+        for country, category_map in raw_data.items():
+            if not isinstance(category_map, dict):
+                logger.warning("Skipping invalid country payload: %s", country)
+                continue
+            for category, trends in category_map.items():
+                is_homepage = self._normalize(category) == self._normalize(HOMEPAGE_CATEGORY)
+                has_homepage = has_homepage or is_homepage
+                group_name = self._group_for_category(category)
+                for trend in trends if isinstance(trends, list) else []:
+                    if not isinstance(trend, dict):
+                        continue
+                    term = self._clean_text(trend.get("trending_term") or trend.get("term"))
+                    tweets = trend.get("tweets", [])
+                    for tweet in tweets if isinstance(tweets, list) else []:
+                        counts["raw_occurrences"] += 1
+                        raw_index = counts["raw_occurrences"]
+                        raw = tweet if isinstance(tweet, dict) else {}
+                        tweet_url = self._clean_text(raw.get("tweet_url"))
+                        key = tweet_url or ("missing_url", raw_index)
+                        if key in records:
+                            counts["duplicate_occurrences"] += 1
+                        elif tweet_url:
+                            counts["unique_urls"] += 1
+                        else:
+                            counts["missing_url_occurrences"] += 1
+                        record = records.setdefault(key, {
+                            "tweet_url": tweet_url, "source_categories": [], "occurrences": [],
+                        })
+                        for source_category in [category, *self._clean_urls(raw.get("source_categories", []))]:
+                            if source_category not in record["source_categories"]:
+                                record["source_categories"].append(source_category)
+                        occurrence = {
+                            "raw_index": raw_index, "country": country,
+                            "source_category": category, "reason": "eligible_candidate",
+                        }
+                        record["occurrences"].append(occurrence)
+                        if is_homepage and tweet_url:
+                            homepage_orders.setdefault(tweet_url, raw_index)
+
+                        cleaned = self._clean_tweet(raw)
+                        tweet_time = self._parse_datetime(cleaned.get("created_at", ""))
+                        reason = ""
+                        if not cleaned:
+                            reason = "invalid_fields"
+                        elif not tweet_time:
+                            reason = "invalid_timestamp"
+                        elif tweet_time < cutoff:
+                            reason = "outside_lookback"
+                        elif not group_name and not is_homepage:
+                            reason = "unmapped_category"
+                        if reason:
+                            occurrence["reason"] = reason
+                            counts[f"{reason}_occurrences"] += 1
+                            continue
+
+                        candidate = candidates.setdefault(tweet_url, {
+                            "item": cleaned, "groups": [], "sources": [], "homepage_order": None,
+                        })
+                        self._merge_tweet(candidate["item"], cleaned)
+                        candidate["sources"].append({"country": country, "category": category, "trending_term": term})
+                        for source_category in record["source_categories"]:
+                            source_group = self._group_for_category(source_category)
+                            if source_group and source_group not in candidate["groups"]:
+                                candidate["groups"].append(source_group)
+
+        for tweet_url, candidate in candidates.items():
+            candidate["homepage_order"] = homepage_orders.get(tweet_url)
+            candidate["groups"].sort(key=lambda name: list(CATEGORY_GROUPS).index(name))
+            if candidate["homepage_order"] is not None and not candidate["item"].get("homepage_rank"):
+                candidate["item"]["homepage_rank"] = list(homepage_orders).index(tweet_url) + 1
+        return candidates, {"counts": counts, "tweets_by_key": records}, has_homepage
+
+    def _merge_tweet(self, target: dict, incoming: dict) -> None:
+        """Fill missing text and combine observed media/metrics for one URL."""
+        for field in ("content", "author_name", "homepage_rank"):
+            if not target.get(field) and incoming.get(field):
+                target[field] = incoming[field]
+        for field in ("media_urls", "media_types", "media_alt_texts"):
+            target[field] = list(dict.fromkeys([*target.get(field, []), *incoming.get(field, [])]))
+        for field in ("likes", "retweets", "replies", "views"):
+            target[field] = max(target.get(field, 0), incoming.get(field, 0))
+
+    def _assign_to_group(self, tweet_url: str, candidates: dict, group_urls: dict, selected: dict, visited: set) -> bool:
+        """Find capacity, moving already selected cross-category tweets if needed."""
+        eligible_groups = [name for name in candidates[tweet_url]["groups"] if name not in visited]
+        for name in eligible_groups:
+            if len(group_urls[name]) < MAX_ITEMS_PER_GROUP:
+                group_urls[name].append(tweet_url)
+                selected[tweet_url] = name
+                return True
+        for name in eligible_groups:
+            if name in visited:
+                continue
+            visited.add(name)
+            for previous_url in reversed(group_urls[name][:]):
+                if self._assign_to_group(previous_url, candidates, group_urls, selected, visited):
+                    group_urls[name].remove(previous_url)
+                    group_urls[name].append(tweet_url)
+                    selected[tweet_url] = name
+                    return True
+        return False
 
     def _empty_groups(self) -> Dict[str, Dict[str, Any]]:
         return {
@@ -133,8 +271,13 @@ class DataProcessor:
             "replies": self._to_int(tweet.get("replies")),
             "views": self._to_int(tweet.get("views")),
             "media_urls": self._clean_urls(tweet.get("media_urls", [])),
+            "media_types": self._clean_urls(tweet.get("media_types", [])),
+            "media_alt_texts": self._clean_urls(tweet.get("media_alt_texts", [])),
+            "author_name": self._clean_text(tweet.get("author_name")),
             "tweet_url": self._clean_text(tweet.get("tweet_url")),
         }
+        if self._to_int(tweet.get("homepage_rank")) > 0:
+            cleaned["homepage_rank"] = self._to_int(tweet["homepage_rank"])
 
         return cleaned if self.validate_tweet(cleaned) else {}
 
@@ -164,7 +307,12 @@ class DataProcessor:
         return likes * 2 + retweets * 4 + replies * 3
 
     def _fallback_summary(self, tweet: Dict[str, Any], trend_term: str) -> str:
+        if not tweet.get("content"):
+            author = self._truncate(tweet.get("author_name") or tweet.get("author") or "该作者", 28)
+            return f"媒体动态（{author}无正文动态）：原帖仅含媒体，具体内容待查看原帖，不推断事件。"
         headline = self._headline_from_content(tweet.get("content", "")) or "热门动态"
+        if tweet.get("source_category") == HOMEPAGE_CATEGORY:
+            return self._truncate(f"首页热点（{headline}）：作者正文：{tweet['content']}", 120)
         topic = self._category_label(trend_term)
         description = self._fallback_description(tweet.get("content", ""))
         return self._truncate(f"{topic}（{headline}）：{description}", 120)
@@ -172,9 +320,15 @@ class DataProcessor:
     def _fallback_top_actions(self, groups: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         candidates = []
         for group in groups:
-            if group.get("name") == "News / Society / Sensitive Topics":
+            if group.get("name") in {"News / Society / Sensitive Topics", HOMEPAGE_GROUP_NAME}:
                 continue
-            candidates.extend(group.get("items", []))
+            candidates.extend(
+                item for item in group.get("items", [])
+                if item.get("content") and not any(
+                    self._group_for_category(category) == "News / Society / Sensitive Topics"
+                    for category in item.get("source_categories", [])
+                )
+            )
 
         actions = []
         for item in sorted(candidates, key=lambda tweet: tweet.get("score", 0), reverse=True):

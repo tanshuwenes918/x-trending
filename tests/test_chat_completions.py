@@ -226,6 +226,7 @@ def test_invalid_chat_completion_does_not_write_or_send_report(monkeypatch, proc
     monkeypatch.setattr(settings, "DRY_RUN", False)
     monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path)
     scraper = MagicMock()
+    scraper.scrape_all.return_value = {"Global": {"Technology": [{"tweets": []}]}}
     data_processor = MagicMock()
     data_processor.process.return_value = deepcopy(report)
     exporter = MagicMock()

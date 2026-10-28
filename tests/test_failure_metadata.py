@@ -17,6 +17,7 @@ import scrapers.trending_scraper as scraper_module
 @pytest.fixture
 def pipeline(monkeypatch, tmp_path):
     observed = MagicMock()
+    observed.scraper.scrape_all.return_value = {"Global": {"Technology": [{"tweets": []}]}}
     observed.args = argparse.Namespace(output_format="both", dry_run=False, input_json="")
     observed.report = {
         "timestamp": "2026-10-28T11:00:00+08:00",

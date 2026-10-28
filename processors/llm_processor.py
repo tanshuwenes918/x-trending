@@ -9,6 +9,8 @@ from urllib import request
 from urllib.error import HTTPError, URLError
 
 from config.settings import (
+    HOMEPAGE_CATEGORY,
+    HOMEPAGE_GROUP_NAME,
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_ENABLED,
@@ -78,6 +80,12 @@ class LLMProcessor:
                         "source_category": item.get("source_category", ""),
                         "content": item.get("content", ""),
                         "author": item.get("author", ""),
+                        "author_name": item.get("author_name", ""),
+                        "source_categories": item.get("source_categories", []),
+                        "homepage_rank": item.get("homepage_rank"),
+                        "media_types": item.get("media_types", []),
+                        "media_alt_texts": item.get("media_alt_texts", []),
+                        "media_requires_review": self._is_ungrounded_media(item),
                         "score": item.get("score", 0),
                         "metrics": {
                             "views": item.get("views", 0),
@@ -94,7 +102,11 @@ class LLMProcessor:
         prompt = (
             "你是一个 AI 音乐生成与 AI 视频生成产品的站外增长运营负责人，产品类似 Vanso，目标是从 X 等站外平台找到可转化的内容机会。"
             "请基于输入的 X 热门推文生成简洁中文日报素材。所有输出必须是中文，并优先服务于运营选题、素材生产、评论区导流和落地页转化。"
-            "前 6 个分类只需要为每条推文输出一句摘要，不要写引流动作，但摘要要点出它为什么值得运营观察，例如情绪点、模板化潜力、声音/音乐/视频化潜力或传播机制。"
+            "对输入的每个分组、每条推文逐条输出一句摘要，保留原组名与原链接，不遗漏、合并或删除条目，不在摘要里写引流动作。"
+            "仅基于作者正文 content 和可用的媒体替代描述 media_alt_texts 概述，作者与媒体描述必须区分。媒体替代描述不等于作者正文或已核实事实。"
+            "本请求没有提供图像或视频内容，不能凭链接、作者身份、热度或常识推断媒体画面、事件原因或账号被盗。不要把读者添加的社区注释当作作者观点。"
+            "media_requires_review=true 表示纯媒体且缺少有效描述，只能说明该作者的媒体动态受到关注、具体内容需查看原帖，不猜测事件，也不生成引流动作。"
+            "首页热点可能没有可靠主题分类，只做事实概述，不生成引流动作。对事实明确的非敏感分类内容，可点出情绪、模板化潜力、声音/音乐/视频化潜力或传播机制。"
             "摘要格式必须是“话题名（新闻标题）：简要描述”。"
             "新闻标题用 4 到 18 个中文字符概括事件核心；简要描述用一句话说明这条推文发布了什么、发生了什么或为什么在传播。"
             "不要直译原推文，不要保留英文分类前缀，不要写“摘要：”“链接：”。"
@@ -417,6 +429,7 @@ class LLMProcessor:
         summaries_by_url = {}
         source_items_by_url = {}
         unsafe_urls = set()
+        media_review_urls = set()
 
         for group in data.get("groups", []):
             group_name = group.get("name", "")
@@ -424,7 +437,16 @@ class LLMProcessor:
                 tweet_url = item.get("tweet_url")
                 if tweet_url:
                     source_items_by_url[tweet_url] = item
-                    if group_name == "News / Society / Sensitive Topics":
+                    if self._is_ungrounded_media(item):
+                        media_review_urls.add(tweet_url)
+                    categories = set(item.get("source_categories") or [])
+                    categories.add(item.get("source_category", ""))
+                    if (
+                        group_name in {"News / Society / Sensitive Topics", HOMEPAGE_GROUP_NAME}
+                        or HOMEPAGE_CATEGORY in categories
+                        or any(str(category).strip().lower() in {"news", "religion"} for category in categories)
+                        or tweet_url in media_review_urls
+                    ):
                         unsafe_urls.add(tweet_url)
 
         for group in result.get("groups", []):
@@ -437,7 +459,7 @@ class LLMProcessor:
         for group in data.get("groups", []):
             for item in group.get("items", []):
                 tweet_url = item.get("tweet_url")
-                if tweet_url in summaries_by_url:
+                if tweet_url in summaries_by_url and tweet_url not in media_review_urls:
                     item["summary"] = summaries_by_url[tweet_url]
 
         top_actions = []
@@ -467,6 +489,32 @@ class LLMProcessor:
 
         if top_actions:
             data["top_actions"] = top_actions
+        elif "top_actions" in data:
+            data["top_actions"] = [
+                action for action in data["top_actions"]
+                if action.get("tweet_url") in source_items_by_url
+                and action.get("tweet_url") not in unsafe_urls
+            ]
+
+    def _is_ungrounded_media(self, item: Dict[str, Any]) -> bool:
+        """A media URL or a generic alt label supplies no facts about its content."""
+        if str(item.get("content") or "").strip():
+            return False
+        if not (item.get("media_urls") or item.get("media_types")):
+            return False
+        generic_labels = {
+            "image", "photo", "picture", "video", "gif", "animated gif",
+            "图像", "圖片", "图片", "照片", "视频", "影片", "動圖", "动图",
+        }
+        alt_texts = item.get("media_alt_texts") or []
+        if not isinstance(alt_texts, list):
+            alt_texts = []
+        return not any(
+            isinstance(text, str)
+            and text.strip()
+            and text.strip().lower() not in generic_labels
+            for text in alt_texts
+        )
 
     def _parse_json_content(self, content: str) -> Dict[str, Any]:
         text = content.strip()
