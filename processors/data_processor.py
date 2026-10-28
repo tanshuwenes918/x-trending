@@ -2,6 +2,7 @@
 
 import logging
 import re
+from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -10,7 +11,6 @@ from config.settings import (
     CATEGORY_GROUPS,
     COUNTRIES,
     HOMEPAGE_CATEGORY,
-    HOMEPAGE_GROUP_NAME,
     LOOKBACK_HOURS,
     MAX_ITEMS_PER_GROUP,
     TIMEZONE,
@@ -22,32 +22,23 @@ logger = logging.getLogger(__name__)
 class DataProcessor:
     """Process scraped tweets into the daily operations report shape."""
 
-    def process(self, raw_data: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> Dict[str, Any]:
+    def process(self, raw_data: Dict[str, Dict[str, List[Dict[str, Any]]]], *, reference_time=None) -> Dict[str, Any]:
         """Process raw scraped data."""
         logger.info("Processing scraped data...")
 
-        now = datetime.now(ZoneInfo(TIMEZONE))
+        now = self._parse_datetime(reference_time) if reference_time else datetime.now(ZoneInfo(TIMEZONE))
+        if not now:
+            raise ValueError("Saved source data has no valid collection timestamp")
         cutoff = now - timedelta(hours=LOOKBACK_HOURS)
-        candidates, diagnostics, has_homepage = self._collect_candidates(raw_data, cutoff)
+        candidates, diagnostics, _ = self._collect_candidates(raw_data, cutoff)
         groups = self._empty_groups()
-        if has_homepage:
-            groups = {
-                HOMEPAGE_GROUP_NAME: {
-                    "name": HOMEPAGE_GROUP_NAME,
-                    "source_categories": [HOMEPAGE_CATEGORY],
-                    "items": [],
-                },
-                **groups,
-            }
-
         selected = {}
-        homepage_candidates = sorted(
-            (candidate for candidate in candidates.values() if candidate["homepage_order"] is not None),
-            key=lambda candidate: candidate["homepage_order"],
-        )
-        for candidate in homepage_candidates[:MAX_ITEMS_PER_GROUP]:
-            selected[candidate["item"]["tweet_url"]] = HOMEPAGE_GROUP_NAME
-
+        # The homepage is a source, never an extra display section. Unknown
+        # homepage-only sources stay in the candidate pool for semantic editing.
+        # The source grouping below is also usable when the optional LLM is off.
+        for candidate in candidates.values():
+            if not candidate["groups"]:
+                candidate["groups"] = ["News / Society / Sensitive Topics"]
         # Aggregate every source before selecting. A full first source group must
         # not prevent a tweet from filling a slot in another source group.
         group_urls = {name: [] for name in CATEGORY_GROUPS}
@@ -65,10 +56,8 @@ class DataProcessor:
                 continue
 
             item = candidate["item"]
-            category = HOMEPAGE_CATEGORY if group_name == HOMEPAGE_GROUP_NAME else next(
-                category for category in record["source_categories"]
-                if self._group_for_category(category) == group_name
-            )
+            category = next((category for category in record["source_categories"]
+                             if self._group_for_category(category) == group_name), HOMEPAGE_CATEGORY)
             source = next(
                 (source for source in candidate["sources"] if source["category"] == category),
                 candidate["sources"][0],
@@ -83,11 +72,8 @@ class DataProcessor:
             groups[group_name]["items"].append(item)
             record.update(status="selected", selected_group=group_name)
 
-        for group_name, group in groups.items():
-            if group_name == HOMEPAGE_GROUP_NAME:
-                group["items"].sort(key=lambda item: candidates[item["tweet_url"]]["homepage_order"])
-            else:
-                group["items"].sort(key=lambda item: item.get("score", 0), reverse=True)
+        for group in groups.values():
+            group["items"].sort(key=lambda item: item.get("score", 0), reverse=True)
 
         group_list = list(groups.values())
         eligible_tweet_count = sum(len(group["items"]) for group in group_list)
@@ -104,6 +90,18 @@ class DataProcessor:
             quota_excluded_unique_urls=sum(record.get("exclusion_reason") == "group_quota" for record in records),
         )
 
+        editorial_candidates = []
+        records_by_url = {record["tweet_url"]: record for record in records if record["tweet_url"]}
+        for tweet_url, candidate in candidates.items():
+            item = deepcopy(candidate["item"])
+            source = candidate["sources"][0]
+            item.update(
+                country=source["country"], source_category=source["category"],
+                source_categories=records_by_url[tweet_url]["source_categories"],
+                trending_term=source["trending_term"], score=self._score(item),
+            )
+            editorial_candidates.append(item)
+
         return {
             "timestamp": now.isoformat(),
             "timezone": TIMEZONE,
@@ -111,6 +109,7 @@ class DataProcessor:
             "countries": COUNTRIES,
             "groups": group_list,
             "top_actions": self._fallback_top_actions(group_list),
+            "editorial_candidates": editorial_candidates,
             "processing_diagnostics": diagnostics,
             "summary": {
                 "country_count": len(COUNTRIES),
@@ -120,6 +119,91 @@ class DataProcessor:
                 "max_items_per_group": MAX_ITEMS_PER_GROUP,
             },
         }
+
+    def apply_editorial_metadata(self, data: dict, metadata: list) -> dict:
+        """Select the hottest representative of each event, then each group's top N.
+
+        Metadata is validated before changing the report so failed editing can be
+        retried from the complete original pool. Engagement counts are never
+        added across different posts about an event.
+        """
+        source_items = {item["tweet_url"]: item for item in data.get("editorial_candidates", [])}
+        if not source_items:
+            raise ValueError("Editorial selection requires a nonempty candidate pool")
+        by_url = {}
+        events = {}
+        for entry in metadata:
+            url = entry.get("tweet_url")
+            group = entry.get("editorial_group")
+            event_id = entry.get("event_id")
+            if url not in source_items or url in by_url or group not in CATEGORY_GROUPS or not event_id:
+                raise ValueError("Editorial metadata must cover each candidate once with a valid event/group")
+            by_url[url] = entry
+            event = events.setdefault(event_id, {"group": group, "members": []})
+            if event["group"] != group:
+                raise ValueError("The same event cannot occupy multiple report groups")
+            event["members"].append(url)
+        if set(by_url) != set(source_items):
+            raise ValueError("Editorial metadata omitted source candidates")
+
+        groups = self._empty_groups()
+        representatives = []
+        representative_for = {}
+        for event_id, event in events.items():
+            members = sorted(event["members"], key=lambda url: (-self._score(source_items[url]), url))
+            representative_url = members[0]
+            item = deepcopy(source_items[representative_url])
+            meta = by_url[representative_url]
+            for key in ("subject_label", "related_regions", "region_review_notes"):
+                item[key] = deepcopy(meta.get(key, [] if key != "subject_label" else ""))
+            item.update(
+                event_id=event_id, editorial_group=event["group"],
+                editorial_sensitive=any(by_url[url].get("editorial_sensitive", False) for url in members),
+                related_tweet_urls=members[1:], event_source_count=len(members), score=self._score(item),
+                source_categories=list(dict.fromkeys(category for url in members
+                                                    for category in source_items[url].get("source_categories", []))),
+            )
+            item["summary"] = self._fallback_summary(item, item.get("trending_term", ""))
+            representatives.append(item)
+            for url in members:
+                representative_for[url] = representative_url
+
+        selected_urls = set()
+        for item in sorted(representatives, key=lambda item: (-item["score"], item["tweet_url"])):
+            target = groups[item["editorial_group"]]["items"]
+            if len(target) < MAX_ITEMS_PER_GROUP:
+                target.append(item)
+                selected_urls.add(item["tweet_url"])
+
+        diagnostics = deepcopy(data.get("processing_diagnostics", {"counts": {}, "tweets": []}))
+        for record in diagnostics.get("tweets", []):
+            url = record.get("tweet_url")
+            if url not in representative_for:
+                continue
+            record.pop("selected_group", None)
+            record.pop("exclusion_reason", None)
+            record["event_id"] = by_url[url]["event_id"]
+            if url in selected_urls:
+                record.update(status="selected", selected_group=by_url[url]["editorial_group"])
+            else:
+                representative = representative_for[url]
+                reason = "same_event" if representative != url else "group_quota"
+                record.update(status="excluded", exclusion_reason=reason, representative_url=representative)
+        diagnostics.setdefault("counts", {}).update(
+            event_count=len(events), same_event_excluded_urls=len(source_items) - len(events),
+            selected_unique_urls=len(selected_urls),
+            excluded_unique_urls=sum(bool(record.get("tweet_url")) and record.get("status") == "excluded"
+                                     for record in diagnostics.get("tweets", [])),
+            quota_excluded_unique_urls=len(events) - len(selected_urls),
+        )
+        group_list = list(groups.values())
+        summary = {**data.get("summary", {}), "group_count": len(group_list),
+                   "eligible_tweet_count": len(selected_urls), "max_items_per_group": MAX_ITEMS_PER_GROUP,
+                   "event_count": len(events)}
+        data.update(groups=group_list, processing_diagnostics=diagnostics,
+                    summary=summary, top_actions=self._fallback_top_actions(group_list),
+                    editorial_applied=True, editorial_metadata=deepcopy(metadata))
+        return data
 
     def validate_tweet(self, tweet: Dict[str, Any]) -> bool:
         """Validate a tweet record."""
@@ -308,8 +392,11 @@ class DataProcessor:
 
     def _fallback_summary(self, tweet: Dict[str, Any], trend_term: str) -> str:
         if not tweet.get("content"):
-            author = self._truncate(tweet.get("author_name") or tweet.get("author") or "该作者", 28)
-            return f"媒体动态（{author}无正文动态）：原帖仅含媒体，具体内容待查看原帖，不推断事件。"
+            subject = self._truncate(tweet.get("subject_label") or tweet.get("author_name") or tweet.get("author") or "未识别账号", 40)
+            kind = "视频" if "video" in tweet.get("media_types", []) else "图片" if any(
+                value in {"image", "photo"} for value in tweet.get("media_types", [])
+            ) else "媒体"
+            return f"{subject}：发布{kind}动态，原帖无正文，具体内容请查看原帖。"
         headline = self._headline_from_content(tweet.get("content", "")) or "热门动态"
         if tweet.get("source_category") == HOMEPAGE_CATEGORY:
             return self._truncate(f"首页热点（{headline}）：作者正文：{tweet['content']}", 120)
@@ -320,11 +407,11 @@ class DataProcessor:
     def _fallback_top_actions(self, groups: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         candidates = []
         for group in groups:
-            if group.get("name") in {"News / Society / Sensitive Topics", HOMEPAGE_GROUP_NAME}:
+            if group.get("name") == "News / Society / Sensitive Topics":
                 continue
             candidates.extend(
                 item for item in group.get("items", [])
-                if item.get("content") and not any(
+                if item.get("content") and not item.get("editorial_sensitive") and not any(
                     self._group_for_category(category) == "News / Society / Sensitive Topics"
                     for category in item.get("source_categories", [])
                 )
@@ -346,6 +433,8 @@ class DataProcessor:
                     "views": item.get("views", 0),
                 }
             )
+            if "related_regions" in item:
+                actions[-1]["related_regions"] = deepcopy(item["related_regions"])
         return actions
 
     def _headline_from_content(self, content: str) -> str:

@@ -52,6 +52,8 @@ class FeishuExporter:
         """Format processed data as Feishu post messages."""
         timestamp = data.get("timestamp", "")
         blocks: List[List[Dict[str, str]]] = []
+        if self._has_region_metadata(data):
+            blocks.append(self._text_line("地区标签表示内容涉及地区，不代表当地热榜排名。"))
 
         for index, group in enumerate(data.get("groups", []), start=1):
             group_name = group.get("name", "")
@@ -65,7 +67,7 @@ class FeishuExporter:
                 summary_text = self._truncate(item.get("summary", ""), 140)
                 blocks.append(
                     self._text_with_metrics_and_link(
-                        f"{item_index}. {summary_text}",
+                        f"{item_index}. {self._region_prefix(item)}{summary_text}",
                         item,
                         item.get("tweet_url", ""),
                     )
@@ -83,7 +85,7 @@ class FeishuExporter:
             action_text = self._truncate(action.get("action", ""), 140)
             blocks.append(
                 self._text_with_metrics_and_link(
-                    f"{index}. {title}：{action_text}",
+                    f"{index}. {self._region_prefix(action)}{title}：{action_text}",
                     action,
                     action.get("tweet_url", ""),
                 )
@@ -97,6 +99,8 @@ class FeishuExporter:
             self._report_title(data.get("timestamp", "")),
             "",
         ]
+        if self._has_region_metadata(data):
+            lines.extend(["地区标签表示内容涉及地区，不代表当地热榜排名。", ""])
 
         for index, group in enumerate(data.get("groups", []), start=1):
             group_name = group.get("name", "")
@@ -106,7 +110,7 @@ class FeishuExporter:
                 lines.append("暂无符合条件的推文。")
             for item_index, item in enumerate(items, start=1):
                 summary_text = self._truncate(item.get("summary", ""), 140)
-                lines.append(f"{item_index}. {summary_text}{self._plain_metrics_and_url(item)}")
+                lines.append(f"{item_index}. {self._region_prefix(item)}{summary_text}{self._plain_metrics_and_url(item)}")
             lines.append("")
 
         action_section_index = len(data.get("groups", [])) + 1
@@ -117,9 +121,30 @@ class FeishuExporter:
         for index, action in enumerate(top_actions, start=1):
             title = self._truncate(action.get("title", ""), 60)
             action_text = self._truncate(action.get("action", ""), 140)
-            lines.append(f"{index}. {title}：{action_text}{self._plain_metrics_and_url(action)}")
+            lines.append(f"{index}. {self._region_prefix(action)}{title}：{action_text}{self._plain_metrics_and_url(action)}")
 
         return "\n".join(lines)
+
+    def _has_region_metadata(self, data: Dict[str, Any]) -> bool:
+        return any(
+            "related_regions" in item
+            for group in data.get("groups", [])
+            for item in group.get("items", [])
+        ) or any("related_regions" in item for item in data.get("top_actions", []))
+
+    def _region_prefix(self, item: Dict[str, Any]) -> str:
+        """Show event associations while leaving legacy saved reports intact."""
+        if "related_regions" not in item:
+            return ""
+        regions = item.get("related_regions")
+        names = []
+        for region in regions if isinstance(regions, list) else []:
+            if not isinstance(region, dict) or not isinstance(region.get("name"), str):
+                continue
+            name = " ".join(region["name"].split())
+            if name and name not in names:
+                names.append(name)
+        return f"【涉及：{'／'.join(names)}】" if names else "【涉及地区待确认】"
 
     def _post_message(self, message: Dict[str, Any]) -> bool:
         """Post message to Feishu webhook."""

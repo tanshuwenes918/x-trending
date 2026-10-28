@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument(
         "--input-json",
         default="",
-        help="Load an existing processed JSON file instead of scraping. Use 'latest' for the newest outputs/x_trending_*.json.",
+        help="Load a report/checkpoint or timestamped raw_candidates JSON instead of scraping. Use 'latest' for the newest outputs/x_trending_*.json.",
     )
     return parser.parse_args()
 
@@ -198,7 +198,14 @@ def main():
             stage = "读取保存数据"
             input_path = resolve_input_json(args.input_json)
             logger.info("Loading existing JSON input from %s", input_path)
-            trending_data = read_json_input(input_path)
+            saved_data = read_json_input(input_path)
+            if "raw_data" in saved_data:
+                if not saved_data.get("collected_at"):
+                    raise ValueError("Raw candidate input must include its original collection timestamp")
+                stage = "数据整理"
+                trending_data = processor.process(saved_data["raw_data"], reference_time=saved_data["collected_at"])
+            else:
+                trending_data = saved_data
         else:
             stage = "X 抓取"
             raw_data = scraper.scrape_all()
@@ -215,7 +222,8 @@ def main():
             trending_data = llm_processor.enrich(trending_data)
         except Exception:
             try:
-                retry_path = write_retry_checkpoint(retry_input)
+                edited_checkpoint = getattr(llm_processor, "retry_checkpoint", None)
+                retry_path = write_retry_checkpoint(edited_checkpoint if isinstance(edited_checkpoint, dict) else retry_input)
             except Exception:
                 logger.error("Failed to save LLM retry input", exc_info=True)
             else:
