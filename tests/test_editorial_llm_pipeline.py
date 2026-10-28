@@ -13,7 +13,7 @@ import pytest
 import config.settings as settings
 import exporters.feishu_exporter as exporter_module
 import main as entrypoint
-from processors import data_processor, llm_processor, report_editor
+from processors import data_processor, llm_processor, region_resolver, report_editor
 from processors.llm_processor import LLMProcessor
 import scrapers.trending_scraper as scraper_module
 
@@ -33,6 +33,21 @@ def source(number, **fields):
 
 def old_report():
     return {"groups": [{"name": "Music / Dance / Entertainment", "items": [source(1)]}], "top_actions": []}
+
+
+def region_rows(data, **overrides):
+    return [
+        {"tweet_url": item["tweet_url"], "related_regions": deepcopy(item.get("related_regions", [])),
+         "region_review_notes": [], "region_review_reason": "Unknown subject has no confirmed association.",
+         **overrides}
+        for group in data["groups"] for item in group["items"]
+    ]
+
+
+def mock_region_review(monkeypatch):
+    resolve = MagicMock(side_effect=lambda data, request_json: region_rows(data))
+    monkeypatch.setattr(region_resolver.RegionResolver, "resolve", resolve)
+    return resolve
 
 
 def test_recommended_actions_keep_the_selected_sources_region_evidence():
@@ -76,17 +91,25 @@ def test_all_candidates_are_organized_before_only_final_items_are_summarized(mon
             return {"items": metadata}
         events.append("summary request")
         assert data["editorial_applied"] is True
+        assert data["region_review_completed"] is True
         items = [item for group in payload["groups"] for item in group["items"]]
         assert len(items) == 30
         assert all(item["subject_label"] == "已识别主体" for item in items)
         return {"groups": [], "top_actions": []}
 
+    def resolve(self, received, request_json):
+        events.append("regions")
+        assert received is data
+        assert len([item for group in received["groups"] for item in group["items"]]) == 30
+        return region_rows(received)
+
     monkeypatch.setattr(report_editor.ReportEditor, "organize", organize)
     monkeypatch.setattr(data_processor.DataProcessor, "apply_editorial_metadata", apply, raising=False)
+    monkeypatch.setattr(region_resolver.RegionResolver, "resolve", resolve)
     monkeypatch.setattr(processor, "_responses_json", respond)
 
     assert processor.enrich(data) is data
-    assert events == ["organize", "editorial request", "select", "summary request"]
+    assert events == ["organize", "editorial request", "select", "regions", "summary request"]
     assert data["llm_used"] is True
 
 
@@ -101,6 +124,11 @@ def test_summary_failure_preserves_applied_selection_and_retry_skips_organizatio
 
     monkeypatch.setattr(report_editor.ReportEditor, "organize", organize)
     monkeypatch.setattr(data_processor.DataProcessor, "apply_editorial_metadata", apply, raising=False)
+    resolve = mock_region_review(monkeypatch)
+    japan = {"name": "日本", "basis": "identity", "evidence": "Chiikawa"}
+    resolve.side_effect = lambda report, request_json: region_rows(
+        report, related_regions=[japan], region_review_reason="Known Japanese IP."
+    )
     respond = MagicMock(side_effect=RuntimeError("summary unavailable"))
     monkeypatch.setattr(processor, "_responses_json", respond)
 
@@ -108,18 +136,125 @@ def test_summary_failure_preserves_applied_selection_and_retry_skips_organizatio
         processor.enrich(data)
 
     assert data["editorial_applied"] is True
+    assert data["region_review_completed"] is True
+    resolve.assert_called_once()
     assert data["groups"][0]["items"][0]["subject_label"] == "Chiikawa（吉伊卡哇）"
     assert processor.retry_checkpoint == data
     assert processor.retry_checkpoint is not data
+    assert processor.retry_checkpoint["groups"][0]["items"][0]["related_regions"] == [japan]
     data["groups"][0]["items"][0]["summary"] = "partial summary mutation"
     assert processor.retry_checkpoint["groups"][0]["items"][0]["summary"] == "保留摘要"
     assert "llm_used" not in data
     respond.side_effect = None
     respond.return_value = {"groups": [], "top_actions": []}
-    processor.enrich(data)
+    retry_data = processor.retry_checkpoint
+    processor.enrich(retry_data)
     assert organize.call_count == 1
-    assert data["llm_used"] is True
+    assert resolve.call_count == 1
+    assert retry_data["llm_used"] is True
+    assert retry_data["groups"][0]["items"][0]["related_regions"] == [japan]
     assert processor.retry_checkpoint is None
+
+
+def test_region_review_adds_subject_associations_without_changing_report_selection(monkeypatch):
+    japan = {"name": "日本", "basis": "identity", "evidence": "ngnchiikawa"}
+    united_states = {"name": "美国", "basis": "identity", "evidence": "埃隆·马斯克"}
+    chiikawa = source(1, event_id="chiikawa", score=300, subject_label="Chiikawa", related_regions=[japan])
+    musk = source(2, event_id="musk", score=200, subject_label="埃隆·马斯克", related_regions=[])
+    data = {
+        "editorial_applied": True,
+        "groups": [{"name": "AI / Tech / Creator Tools", "items": [chiikawa, musk]}],
+        "editorial_metadata": [
+            {"tweet_url": chiikawa["tweet_url"], "event_id": "chiikawa", "related_regions": [deepcopy(japan)]},
+            {"tweet_url": musk["tweet_url"], "event_id": "musk", "related_regions": []},
+            {"tweet_url": source(3)["tweet_url"], "event_id": "musk", "related_regions": []},
+        ],
+        "top_actions": [deepcopy(musk)],
+    }
+    before = deepcopy(data)
+    resolve = MagicMock(return_value=[
+        {"tweet_url": chiikawa["tweet_url"], "related_regions": [], "region_review_notes": [],
+         "region_review_reason": "No additional association."},
+        {"tweet_url": musk["tweet_url"], "related_regions": [united_states], "region_review_notes": [],
+         "region_review_reason": "美国汽车创业及企业活动关联。"},
+    ])
+    monkeypatch.setattr(region_resolver.RegionResolver, "resolve", resolve)
+
+    configured_processor()._complete_report_regions(data)
+
+    resolve.assert_called_once()
+    assert chiikawa["related_regions"] == [japan]
+    assert musk["related_regions"] == [united_states]
+    assert data["top_actions"][0]["related_regions"] == [united_states]
+    assert [item["related_regions"] for item in data["editorial_metadata"]] == [[japan], [united_states], [united_states]]
+    for old, new in zip(before["groups"][0]["items"], data["groups"][0]["items"]):
+        for field in ("tweet_url", "event_id", "score", "subject_label", "summary"):
+            assert new[field] == old[field]
+    assert data["groups"][0]["name"] == before["groups"][0]["name"]
+    musk["related_regions"][0]["name"] = "changed after review"
+    assert data["editorial_metadata"][1]["related_regions"][0]["name"] == "美国"
+    assert data["top_actions"][0]["related_regions"][0]["name"] == "美国"
+
+
+def test_region_failure_preserves_selection_checkpoint_and_retries_only_region_review(monkeypatch):
+    processor = configured_processor()
+    data = {**old_report(), "editorial_applied": True, "editorial_candidates": [source(1)]}
+    before = deepcopy(data)
+    organize = MagicMock(side_effect=AssertionError("Selection must not run again"))
+    monkeypatch.setattr(report_editor.ReportEditor, "organize", organize)
+    resolve = MagicMock(side_effect=RuntimeError("region service unavailable"))
+    monkeypatch.setattr(region_resolver.RegionResolver, "resolve", resolve)
+    respond = MagicMock(return_value={"groups": [], "top_actions": []})
+    monkeypatch.setattr(processor, "_responses_json", respond)
+
+    with pytest.raises(RuntimeError, match="region service unavailable"):
+        processor.enrich(data)
+
+    assert not data.get("region_review_completed")
+    assert data == before
+    assert processor.retry_checkpoint == before
+    assert processor.retry_checkpoint is not data
+    respond.assert_not_called()
+    checkpoint = processor.retry_checkpoint
+    resolve.side_effect = lambda report, request_json: region_rows(report)
+
+    processor.enrich(checkpoint)
+
+    assert checkpoint["region_review_completed"] is True
+    assert checkpoint["llm_used"] is True
+    assert resolve.call_count == 2
+    organize.assert_not_called()
+    respond.assert_called_once()
+
+
+def test_global_event_scope_replaces_country_of_product_origin_everywhere(monkeypatch):
+    original = {"name": "美国", "basis": "identity", "evidence": "侠盗猎车手 VI"}
+    worldwide = {"name": "全球", "basis": "identity", "evidence": "侠盗猎车手 VI"}
+    gta = source(1, event_id="gta", content="侠盗猎车手 VI 预加载与发售时间", score=100,
+                 subject_label="GTA VI", related_regions=[original])
+    data = {
+        "editorial_applied": True,
+        "groups": [{"name": "Gaming / Sports / Youth Culture", "items": [gta]}],
+        "editorial_metadata": [
+            {"tweet_url": gta["tweet_url"], "event_id": "gta", "related_regions": [deepcopy(original)]},
+            {"tweet_url": source(2)["tweet_url"], "event_id": "gta", "related_regions": [deepcopy(original)]},
+        ],
+        "top_actions": [deepcopy(gta)],
+    }
+    resolve = MagicMock(return_value=[
+        {"tweet_url": gta["tweet_url"], "related_regions": [worldwide], "region_review_notes": [],
+         "region_review_reason": "全球发行信息，按当前事件覆盖范围标注。"},
+    ])
+    monkeypatch.setattr(region_resolver.RegionResolver, "resolve", resolve)
+
+    configured_processor()._complete_report_regions(data)
+
+    assert gta["related_regions"] == [worldwide]
+    assert all(row["related_regions"] == [worldwide] for row in data["editorial_metadata"])
+    assert data["top_actions"][0]["related_regions"] == [worldwide]
+    assert gta["score"] == 100
+    assert gta["event_id"] == "gta"
+    assert gta["summary"] == "保留摘要"
 
 
 def test_real_editor_and_selection_contract_summarizes_distinct_top_five_per_group(monkeypatch):
@@ -143,9 +278,17 @@ def test_real_editor_and_selection_contract_summarizes_distinct_top_five_per_gro
 
     def respond(payload, prompt=None):
         calls.append((payload, prompt))
-        if prompt is not None:
+        if "candidates" in payload:
             assert len(payload["candidates"]) == 48
             return {"events": events}
+        if prompt is not None:
+            # Keep the real country resolver in this fixture: every selected
+            # URL must receive a review, even if no country can be established.
+            assert len(payload["items"]) == 30
+            return {"items": [
+                {"tweet_url": item["tweet_url"], "related_regions": [], "reason": "Unknown fictional topic."}
+                for item in payload["items"]
+            ]}
         assert len(payload["groups"]) == 6
         assert all(len(group["items"]) == 5 for group in payload["groups"])
         assert len({item["tweet_url"] for group in payload["groups"] for item in group["items"]}) == 30
@@ -155,10 +298,13 @@ def test_real_editor_and_selection_contract_summarizes_distinct_top_five_per_gro
 
     processor.enrich(data)
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert data["summary"]["eligible_tweet_count"] == 30
     assert data["summary"]["event_count"] == 42
     assert data["editorial_applied"] is True
+    assert data["region_review_completed"] is True
+    assert all(item["region_review_reason"] for group in data["groups"] for item in group["items"])
+    assert all(item["region_scope"] == "global" for group in data["groups"] for item in group["items"])
     assert [group["name"] for group in data["groups"]][:2] == list(settings.CATEGORY_GROUPS)[:2]
     assert all([item["views"] for item in group["items"]] == [700, 600, 500, 400, 300] for group in data["groups"])
 
@@ -168,12 +314,15 @@ def test_old_saved_input_keeps_single_summary_request_without_editorial_call(mon
     processor = configured_processor()
     organize = MagicMock(side_effect=AssertionError("Legacy inputs must keep working"))
     monkeypatch.setattr(report_editor.ReportEditor, "organize", organize)
+    resolve = MagicMock(side_effect=AssertionError("Legacy inputs must not require a region review"))
+    monkeypatch.setattr(region_resolver.RegionResolver, "resolve", resolve)
     request_json = MagicMock(return_value={"groups": [], "top_actions": []})
     monkeypatch.setattr(processor, "_responses_json", request_json)
 
     processor.enrich(data)
 
     organize.assert_not_called()
+    resolve.assert_not_called()
     request_json.assert_called_once()
     assert data["llm_used"] is True
 
