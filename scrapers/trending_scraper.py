@@ -154,7 +154,11 @@ class TrendingScraper:
             self._assert_page_accessible(page)
             logger.warning("Category not found or not clickable: %s", category)
             logger.info("Visible non-tweet text sample: %s", self._visible_non_tweet_text_sample(page))
-            return []
+            raise ScrapeError(
+                f"X trending category navigation failed for {category} ({country}); "
+                "no complete daily report will be sent. "
+                "Check the category navigation and page layout."
+            )
 
         self._assert_page_accessible(page)
         self._wait_for_popular_today(page)

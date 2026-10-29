@@ -181,6 +181,11 @@ def write_failure_outputs(stage: str, error: Exception) -> None:
             "完成后请通知项目维护人，由维护人更新自动抓取的登录状态并确认恢复；"
             "仅完成浏览器验证，还不能视为任务已恢复。"
         )
+    elif stage == "X 抓取" and "category navigation" in str(error).lower():
+        reason = (
+            "X 趋势页可以访问，但分类导航未能完整打开，日报已停止以避免内容缺失；"
+            "请项目维护人检查分类入口和页面结构，修复后重新抓取本次日报。"
+        )
 
     try:
         with Path(output_file).open("a", encoding="utf-8") as output:

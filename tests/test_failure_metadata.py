@@ -118,6 +118,17 @@ def test_success_does_not_emit_failure_outputs(pipeline):
     pipeline.exporter.export.assert_called_once()
 
 
+def test_category_navigation_failure_requests_page_repair_not_account_or_api_changes(pipeline):
+    pipeline.scraper.scrape_all.side_effect = RuntimeError("X trending category navigation failed for Technology")
+    with pytest.raises(SystemExit):
+        entrypoint.main()
+    output = pipeline.output_file.read_text(encoding="utf-8")
+    assert "分类导航未能完整打开" in output
+    assert "重新抓取本次日报" in output
+    assert "完成验证" not in output
+    assert "更换可用 API" not in output
+
+
 def test_model_failure_directs_api_configuration_recovery_to_maintainer(pipeline):
     pipeline.llm.enrich.side_effect = RuntimeError("private-api-key=private-value")
 

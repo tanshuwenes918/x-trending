@@ -110,6 +110,57 @@ def test_only_homepage_data_is_rejected_before_it_can_be_a_full_report(monkeypat
     browser.close.assert_called_once()
 
 
+def test_one_successful_category_does_not_hide_a_later_navigation_failure(monkeypatch):
+    scraper = TrendingScraper()
+    page = make_page(ready=True)
+    browser = bind_browser(monkeypatch, scraper, page)
+    tweet = {
+        "tweet_url": "https://x.com/u/status/1", "author": "u", "content": "Source",
+        "created_at": "2026-10-29T05:00:00Z",
+    }
+    collect = MagicMock(side_effect=[[tweet.copy()], [tweet.copy()]])
+    open_category = MagicMock(side_effect=[True, False])
+    monkeypatch.setattr(scraper, "_collect_category_tweets", collect)
+    monkeypatch.setattr(scraper, "_open_category", open_category)
+    monkeypatch.setattr(scraper, "_wait_for_popular_today", lambda page: None)
+
+    with pytest.raises(ScrapeError, match="category navigation failed for Music"):
+        scraper.scrape_all()
+
+    assert open_category.call_count == 2
+    assert collect.call_count == 2  # Homepage and Technology only, never Music.
+    browser.close.assert_called_once()
+
+
+def test_category_navigation_failure_stops_before_collecting_stale_feed(monkeypatch):
+    scraper = TrendingScraper()
+    page = make_page(ready=True)
+    collect = MagicMock()
+    monkeypatch.setattr(scraper, "_open_category", lambda *args: False)
+    monkeypatch.setattr(scraper, "_collect_category_tweets", collect)
+
+    with pytest.raises(ScrapeError, match="category navigation failed for Technology"):
+        scraper.scrape_country_category("Global", "Technology", page=page)
+
+    collect.assert_not_called()
+
+
+def test_opened_category_with_no_tweets_remains_a_valid_empty_result(monkeypatch):
+    scraper = TrendingScraper()
+    page = make_page(ready=True)
+    collect = MagicMock(return_value=[])
+    monkeypatch.setattr(scraper, "_open_category", lambda *args: True)
+    monkeypatch.setattr(scraper, "_collect_category_tweets", collect)
+    monkeypatch.setattr(scraper, "_wait_for_popular_today", lambda page: None)
+
+    result = scraper.scrape_country_category("Global", "Technology", page=page)
+
+    assert len(result) == 1
+    assert result[0]["trending_term"] == "Technology"
+    assert result[0]["tweets"] == []
+    collect.assert_called_once_with(page)
+
+
 def test_real_dom_restores_nested_timeline_and_rejects_tweet_or_plain_text_matches():
     """Exercise the DOM predicates on a nested feed without accessing X."""
     with sync_playwright() as pw:
