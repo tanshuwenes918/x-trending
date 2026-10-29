@@ -66,6 +66,68 @@ def test_same_specific_event_gets_stable_id_but_distinct_brazil_story_stays_sepa
     assert "不能把所有巴西政治合并" in prompt
 
 
+def test_short_source_ids_restore_exact_original_urls_and_preserve_event_identity():
+    sources = [
+        candidate(1, tweet_url="https://x.com/LongMixedCase_Account/status/2115045633832931532"),
+        candidate(2, tweet_url="https://x.com/OtherAccount/status/2115045633832931533"),
+    ]
+    before = deepcopy(sources)
+
+    def respond(payload, prompt):
+        assert [item["source_id"] for item in payload["candidates"]] == ["s1", "s2"]
+        assert [item["tweet_url"] for item in payload["candidates"]] == [item["tweet_url"] for item in sources]
+        assert "输出只用source_ids关联来源" in prompt
+        response_event = event(*sources, subject_label="Same event")
+        response_event.pop("tweet_urls")
+        response_event["source_ids"] = ["s2", "s1"]
+        return {"events": [response_event]}
+
+    result = ReportEditor().organize(sources, respond)
+    legacy, _ = organize(sources, [event(*sources, subject_label="Same event")])
+
+    assert sources == before
+    assert result == legacy
+    assert [item["tweet_url"] for item in result] == [item["tweet_url"] for item in sources]
+    assert all("source_id" not in item for item in result)
+
+
+@pytest.mark.parametrize("source_ids", [["s99"], ["S1"], [" s1"], [1], [None], [["s1"]]])
+def test_unknown_or_changed_short_ids_are_rejected(source_ids):
+    row = event(candidate(1))
+    row.pop("tweet_urls")
+    row["source_ids"] = source_ids
+    with pytest.raises(ReportEditorError, match="unknown source ID"):
+        organize([candidate(1)], [row])
+
+
+@pytest.mark.parametrize("source_ids", [None, "s1", []])
+def test_source_ids_require_a_nonempty_array(source_ids):
+    row = event(candidate(1))
+    row.pop("tweet_urls")
+    row["source_ids"] = source_ids
+    with pytest.raises(ReportEditorError, match="no source_ids"):
+        organize([candidate(1)], [row])
+
+
+def test_short_ids_still_require_complete_unique_source_coverage():
+    sources = [candidate(1), candidate(2)]
+    row = event(*sources)
+    row.pop("tweet_urls")
+    row["source_ids"] = ["s1"]
+    with pytest.raises(ReportEditorError, match="omitted"):
+        organize(sources, [row])
+    with pytest.raises(ReportEditorError, match="more than one"):
+        organize(sources, [{**row, "source_ids": ["s1", "s1", "s2"]}])
+    with pytest.raises(ReportEditorError, match="more than one"):
+        organize(sources, [row, {**row, "source_ids": ["s1", "s2"]}])
+
+
+def test_short_ids_cannot_mask_a_second_ambiguous_url_reference_field():
+    row = event(candidate(1), source_ids=["s1"])
+    with pytest.raises(ReportEditorError, match="ambiguous"):
+        organize([candidate(1)], [row])
+
+
 def test_known_media_accounts_can_have_readable_subjects_without_inventing_events():
     mbappe = candidate(1, author="KMbappe", author_name="Kylian Mbappé", content="", media_types=["image"])
     chiikawa = candidate(2, author="ngnchiikawa", author_name="ちいかわアニメ火金", content="", media_types=["image"])

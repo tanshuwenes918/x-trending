@@ -2,7 +2,9 @@
 
 import argparse
 from copy import deepcopy
+import json
 from unittest.mock import MagicMock
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -11,6 +13,8 @@ import exporters.feishu_exporter as exporter_module
 import main as entrypoint
 import processors.data_processor as processor_module
 import processors.llm_processor as llm_module
+from processors.region_resolver import RegionResolverError
+from processors.report_editor import ReportEditorError
 import scrapers.trending_scraper as scraper_module
 
 
@@ -126,6 +130,93 @@ def test_model_failure_directs_api_configuration_recovery_to_maintainer(pipeline
     assert "Actions Secrets" in output
     assert "必要时更换可用 API" in output
     assert "补跑本次日报" in output
+    assert "private-value" not in output
+
+
+@pytest.mark.parametrize("cause", [
+    ReportEditorError("unknown source URL https://private.invalid/private-value"),
+    RegionResolverError("invalid region private-value"),
+    json.JSONDecodeError("private-value", '{"secret":"private-value"}', 1),
+])
+def test_wrapped_model_content_failure_has_its_own_safe_recovery_reason(pipeline, cause):
+    try:
+        raise RuntimeError("provider-key=private-value") from cause
+    except RuntimeError as failure:
+        pipeline.llm.enrich.side_effect = failure
+
+    with pytest.raises(SystemExit):
+        entrypoint.main()
+
+    output = pipeline.output_file.read_text(encoding="utf-8")
+    assert "failure_stage=模型内容校验\n" in output
+    assert "模型已返回结果，但内容格式或原始来源引用未通过校验" in output
+    assert "请项目维护人检查模型输出与整理规则" in output
+    assert "修复后使用本次保存数据补跑" in output
+    assert "无需据此判定 API 不可用或更换接口" in output
+    assert "Actions Secrets" not in output
+    assert "必要时更换可用 API" not in output
+    assert "private-value" not in output
+    assert "private.invalid" not in output
+    assert len(output.splitlines()) == 2
+    pipeline.exporter.export.assert_not_called()
+
+
+def test_model_content_error_can_be_found_through_cyclic_context_and_cause(pipeline):
+    outer = RuntimeError("private-value outer")
+    middle = RuntimeError("private-value middle")
+    outer.__context__ = middle
+    middle.__context__ = outer
+    # Follow both links: the cycle is in context, the relevant error in cause.
+    middle.__cause__ = ReportEditorError("private-value source")
+
+    entrypoint.write_failure_outputs("模型摘要", outer)
+
+    output = pipeline.output_file.read_text(encoding="utf-8")
+    assert "failure_stage=模型内容校验\n" in output
+    assert "private-value" not in output
+
+
+@pytest.mark.parametrize("cause", [
+    HTTPError("https://private.invalid/private-value", 503, "private-value", {}, None),
+    URLError("private-value connection"),
+    TimeoutError("private-value timeout"),
+])
+def test_wrapped_transport_failure_keeps_api_recovery_reason(pipeline, cause):
+    outer = RuntimeError("private-value outer")
+    outer.__cause__ = cause
+
+    entrypoint.write_failure_outputs("模型摘要", outer)
+
+    output = pipeline.output_file.read_text(encoding="utf-8")
+    assert "failure_stage=模型摘要\n" in output
+    assert "LLM API 调用异常" in output
+    assert "Actions Secrets" in output
+    assert "private-value" not in output
+    assert "private.invalid" not in output
+
+
+def test_context_cycle_without_content_error_keeps_api_reason(pipeline):
+    first = RuntimeError("private-value first")
+    second = RuntimeError("private-value second")
+    first.__context__ = second
+    second.__context__ = first
+
+    entrypoint.write_failure_outputs("模型摘要", first)
+
+    output = pipeline.output_file.read_text(encoding="utf-8")
+    assert "failure_stage=模型摘要\n" in output
+    assert "LLM API 调用异常" in output
+    assert "private-value" not in output
+
+
+def test_json_input_failure_does_not_get_misclassified_as_model_content(pipeline):
+    entrypoint.write_failure_outputs(
+        "读取保存数据", json.JSONDecodeError("private-value", "private-value", 0)
+    )
+
+    output = pipeline.output_file.read_text(encoding="utf-8")
+    assert "failure_stage=读取保存数据\n" in output
+    assert "模型内容校验" not in output
     assert "private-value" not in output
 
 

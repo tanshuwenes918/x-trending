@@ -113,6 +113,76 @@ def test_all_candidates_are_organized_before_only_final_items_are_summarized(mon
     assert data["llm_used"] is True
 
 
+def test_invalid_source_reference_gets_one_corrective_request_using_the_same_complete_pool(monkeypatch):
+    processor = configured_processor()
+    candidates = [source(1, views=100), source(2, views=200)]
+    data = {**old_report(), "editorial_candidates": candidates}
+    before = deepcopy(candidates)
+    requests = []
+    applications = []
+    original_apply = data_processor.DataProcessor.apply_editorial_metadata
+
+    def respond(payload, prompt=None):
+        requests.append((deepcopy(payload), prompt))
+        assert [item["tweet_url"] for item in payload["candidates"]] == [item["tweet_url"] for item in candidates]
+        if len(requests) == 1:
+            return {"events": [{
+                "source_ids": ["s999"], "group": list(settings.CATEGORY_GROUPS)[1],
+                "subject_label": "Invalid reference", "related_regions": [], "sensitive": False,
+            }]}
+        assert len(requests) == 2
+        assert "unknown source ID" in prompt
+        assert "source_ids" in prompt
+        return {"events": [{
+            "source_ids": [item["source_id"]], "group": list(settings.CATEGORY_GROUPS)[1],
+            "subject_label": "Distinct event", "related_regions": [], "sensitive": False,
+        } for item in payload["candidates"]]}
+
+    def apply(self, report, metadata):
+        applications.append(deepcopy(metadata))
+        return original_apply(self, report, metadata)
+
+    monkeypatch.setattr(processor, "_responses_json", respond)
+    monkeypatch.setattr(data_processor.DataProcessor, "apply_editorial_metadata", apply)
+
+    processor._organize_report(data)
+
+    assert len(requests) == 2
+    assert requests[0][0] == requests[1][0]
+    assert "unknown source ID" not in requests[0][1]
+    assert len(applications) == 1
+    assert {row["tweet_url"] for row in applications[0]} == {item["tweet_url"] for item in candidates}
+    assert candidates == before
+    assert data["editorial_applied"] is True
+
+
+def test_two_invalid_editorial_responses_stop_without_applying_or_summarizing(monkeypatch):
+    processor = configured_processor()
+    data = {**old_report(), "editorial_candidates": [source(1)]}
+    before = deepcopy(data)
+    first = report_editor.ReportEditorError("unknown source ID on first response")
+    second = report_editor.ReportEditorError("unknown source ID on corrected response")
+    organize = MagicMock(side_effect=[first, second])
+    apply = MagicMock()
+    summary = MagicMock()
+    resolve = MagicMock()
+    monkeypatch.setattr(report_editor.ReportEditor, "organize", organize)
+    monkeypatch.setattr(data_processor.DataProcessor, "apply_editorial_metadata", apply)
+    monkeypatch.setattr(processor, "_responses_json", summary)
+    monkeypatch.setattr(region_resolver.RegionResolver, "resolve", resolve)
+
+    with pytest.raises(RuntimeError, match="unknown source ID on corrected response") as exc:
+        processor.enrich(data)
+
+    assert exc.value.__cause__ is second
+    assert organize.call_count == 2
+    apply.assert_not_called()
+    summary.assert_not_called()
+    resolve.assert_not_called()
+    assert data == before
+    assert not data.get("editorial_applied")
+
+
 def test_summary_failure_preserves_applied_selection_and_retry_skips_organization(monkeypatch):
     processor = configured_processor()
     data = {**old_report(), "editorial_candidates": [source(1), source(2)]}

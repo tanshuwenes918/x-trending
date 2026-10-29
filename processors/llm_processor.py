@@ -80,12 +80,29 @@ class LLMProcessor:
     def _organize_report(self, data: Dict[str, Any]) -> None:
         """Classify and group every source before summarizing the final stories."""
         from processors.data_processor import DataProcessor
-        from processors.report_editor import ReportEditor
+        from processors.report_editor import ReportEditor, ReportEditorError
 
-        metadata = ReportEditor().organize(
-            data["editorial_candidates"],
-            request_json=lambda payload, prompt: self._responses_json(payload, prompt=prompt),
-        )
+        repair_error = ""
+        for attempt in range(2):
+            def request_editorial(payload, prompt):
+                if repair_error:
+                    prompt += (
+                        f"上一次返回未通过校验：{repair_error}。请重新整理完整输入，"
+                        "逐项核对source_ids只来自输入，每个编号恰好使用一次；"
+                        "禁止补造、修改或丢弃来源，严格遵守媒体合并规则。"
+                    )
+                return self._responses_json(payload, prompt=prompt)
+
+            try:
+                metadata = ReportEditor().organize(
+                    data["editorial_candidates"], request_json=request_editorial,
+                )
+                break
+            except ReportEditorError as exc:
+                if attempt:
+                    raise
+                repair_error = str(exc)
+                logger.warning("Report organization failed validation; requesting one corrected response: %s", exc)
         organized = DataProcessor().apply_editorial_metadata(data, metadata)
         # Keep the caller's dictionary identity so a later summary failure can
         # checkpoint the completed organization step instead of repeating it.
