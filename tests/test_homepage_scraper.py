@@ -24,7 +24,7 @@ def test_homepage_is_collected_before_category_navigation(monkeypatch):
 
     def category(country, name, **kwargs):
         events.append(name)
-        return []
+        return [{"trending_term": name, "tweets": [image_tweet]}] if name == "Technology" else []
 
     monkeypatch.setattr(scraper, "_collect_category_tweets", collect)
     monkeypatch.setattr(scraper, "scrape_country_category", category)

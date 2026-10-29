@@ -126,6 +126,18 @@ class TrendingScraper:
                     )
                     data[country][category] = []
 
+        if CATEGORIES and not any(
+            trend.get("tweets")
+            for country in COUNTRIES
+            for category in CATEGORIES
+            for trend in data[country][category]
+        ):
+            raise ScrapeError(
+                "X trending category navigation returned no tweets in every configured category. "
+                "Only the homepage was collected; refusing to send an incomplete daily report. "
+                "Check the category navigation and page layout, not just the login session."
+            )
+
     def scrape_country_category(
         self,
         country: str,
@@ -142,7 +154,11 @@ class TrendingScraper:
             self._assert_page_accessible(page)
             logger.warning("Category not found or not clickable: %s", category)
             logger.info("Visible non-tweet text sample: %s", self._visible_non_tweet_text_sample(page))
-            return []
+            raise ScrapeError(
+                f"X trending category navigation failed for {category} ({country}); "
+                "no complete daily report will be sent. "
+                "Check the category navigation and page layout."
+            )
 
         self._assert_page_accessible(page)
         self._wait_for_popular_today(page)
@@ -189,37 +205,52 @@ class TrendingScraper:
     def _click_category(self, page: Page, category: str) -> bool:
         aliases = self._category_aliases(category)
 
-        for _ in range(3):
-            self._assert_page_accessible(page)
-            self._return_to_category_nav(page)
-            for alias in aliases:
-                locator = self._find_text_locator(page, alias)
-                if locator is None:
-                    continue
-                try:
-                    locator.scroll_into_view_if_needed(timeout=5000)
-                    locator.click(timeout=8000)
-                    page.wait_for_timeout(3000)
-                    self._assert_page_accessible(page)
-                    return True
-                except ScrapeError:
-                    raise
-                except PlaywrightTimeoutError:
-                    logger.debug("Timed out clicking category alias: %s", alias)
-                except Exception as exc:
-                    logger.debug("Failed clicking category alias %s: %s", alias, exc)
+        for navigation_attempt in range(2):
+            for _ in range(3):
+                self._assert_page_accessible(page)
+                self._return_to_category_nav(page)
+                for alias in aliases:
+                    locator = self._find_text_locator(page, alias)
+                    if locator is None:
+                        continue
+                    try:
+                        locator.scroll_into_view_if_needed(timeout=5000)
+                        locator.click(timeout=8000)
+                        page.wait_for_timeout(3000)
+                        self._assert_page_accessible(page)
+                        return True
+                    except ScrapeError:
+                        raise
+                    except PlaywrightTimeoutError:
+                        logger.debug("Timed out clicking category alias: %s", alias)
+                    except Exception as exc:
+                        logger.debug("Failed clicking category alias %s: %s", alias, exc)
 
-            self._scroll_horizontal_category_rails(page)
-            page.wait_for_timeout(1000)
+                self._scroll_horizontal_category_rails(page)
+                page.wait_for_timeout(1000)
+
+            if navigation_attempt == 0:
+                # X virtualizes parts of the feed and its navigation. Returning
+                # window.scrollY to zero is not sufficient if the category rail
+                # disappeared after scrolling a nested timeline container.
+                from config.settings import X_EXPLORE_URL
+
+                logger.info("Restoring trending navigation once before retrying %s", category)
+                page.goto(X_EXPLORE_URL, wait_until="domcontentloaded", timeout=60000)
+                self._wait_for_global_trending_ready(page)
 
         return False
 
     def _find_text_locator(self, page: Page, text: str):
         for locator in (
+            page.get_by_role("button", name=text, exact=True),
             page.get_by_text(text, exact=True),
             page.get_by_text(re.compile(re.escape(text), re.IGNORECASE)),
         ):
-            count = min(locator.count(), 20)
+            count = locator.count()
+            if not isinstance(count, int):
+                continue
+            count = min(count, 20)
             for index in range(count):
                 candidate = locator.nth(index)
                 if self._is_safe_category_candidate(candidate):
@@ -235,6 +266,7 @@ class TrendingScraper:
                     (el) => {
                       if (!el || !el.isConnected) return false;
                       if (el.closest('article[data-testid="tweet"]')) return false;
+                      if (!el.closest('button, [role="button"], [role="tab"], a[href]')) return false;
                       const rect = el.getBoundingClientRect();
                       return rect.width > 0 && rect.height > 0;
                     }
@@ -278,7 +310,21 @@ class TrendingScraper:
 
     def _return_to_category_nav(self, page: Page) -> None:
         try:
-            page.evaluate("window.scrollTo(0, 0)")
+            page.evaluate(
+                """
+                () => {
+                  window.scrollTo(0, 0);
+                  const root = document.scrollingElement;
+                  if (root) root.scrollTop = 0;
+                  for (const el of document.querySelectorAll('main, section, div')) {
+                    if (el.closest('article[data-testid="tweet"]')) continue;
+                    if (el.scrollTop <= 0 || el.scrollHeight <= el.clientHeight) continue;
+                    const overflow = getComputedStyle(el).overflowY;
+                    if (overflow === 'auto' || overflow === 'scroll') el.scrollTop = 0;
+                  }
+                }
+                """
+            )
             page.wait_for_timeout(1000)
         except Exception as exc:
             logger.debug("Failed returning to category nav: %s", exc)

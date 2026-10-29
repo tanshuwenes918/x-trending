@@ -131,6 +131,25 @@ def write_failure_outputs(stage: str, error: Exception) -> None:
     if not output_file:
         return
 
+    if stage == "模型摘要":
+        from processors.report_editor import ReportEditorError
+        from processors.region_resolver import RegionResolverError
+
+        pending = [error]
+        seen = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, (ReportEditorError, RegionResolverError, json.JSONDecodeError)):
+                stage = "模型内容校验"
+                break
+            pending.extend(
+                linked for linked in (current.__cause__, current.__context__)
+                if linked is not None
+            )
+
     reasons = {
         "初始化": "任务初始化失败，请项目维护人查看任务日志检查配置和依赖。",
         "读取保存数据": "无法读取要复用的数据，请项目维护人检查任务编号及保存的 JSON 文件。",
@@ -140,6 +159,11 @@ def write_failure_outputs(stage: str, error: Exception) -> None:
             "日报摘要生成失败，当前 LLM API 调用异常；"
             "请项目维护人及时检查并更新 Actions Secrets 中的模型接口配置，必要时更换可用 API；"
             "配置更新后，再补跑本次日报任务。"
+        ),
+        "模型内容校验": (
+            "模型已返回结果，但内容格式或原始来源引用未通过校验；"
+            "请项目维护人检查模型输出与整理规则，修复后使用本次保存数据补跑；"
+            "无需据此判定 API 不可用或更换接口。"
         ),
         "保存结果": "日报结果保存失败，请项目维护人查看任务日志检查文件及存储状态。",
         "飞书推送": "飞书推送未确认成功，请项目维护人检查机器人配置及群内消息后再补发。",
@@ -156,6 +180,11 @@ def write_failure_outputs(stage: str, error: Exception) -> None:
             "请账号负责人先在浏览器完成验证，确认能正常查看趋势页；"
             "完成后请通知项目维护人，由维护人更新自动抓取的登录状态并确认恢复；"
             "仅完成浏览器验证，还不能视为任务已恢复。"
+        )
+    elif stage == "X 抓取" and "category navigation" in str(error).lower():
+        reason = (
+            "X 趋势页可以访问，但分类导航未能完整打开，日报已停止以避免内容缺失；"
+            "请项目维护人检查分类入口和页面结构，修复后重新抓取本次日报。"
         )
 
     try:
